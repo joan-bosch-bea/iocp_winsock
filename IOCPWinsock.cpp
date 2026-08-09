@@ -13,11 +13,23 @@ struct SERVER_CONTEXT {
 	SOCKET listeningSocket = INVALID_SOCKET;
 };
 
+DWORD WINAPI WorkerThread(LPVOID lpParam) {
+	SERVER_CONTEXT *lpServerContext = static_cast<SERVER_CONTEXT*>(lpParam);
+
+	DWORD bytesTransferred = 0;//bytes transferits durant l'operació, si el client tanca la connexió els bytes son 0
+	ULONG_PTR completionKey = 0;
+	OVERLAPPED *pOverlapped = nullptr;//per diferenciar operacions pendents de lectura o escriptura
+
+	return 0;
+}
+
 int main() {
 	WSADATA wsaData;
 	sockaddr_in serverAddress{};
 	vector<HANDLE> hWorkersVector;
 	SERVER_CONTEXT serverContext;
+	SYSTEM_INFO systemInfo;
+	DWORD workerCount;
 
 	//inicialitza winsock
 	if(WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
@@ -58,5 +70,18 @@ int main() {
 		closesocket(serverContext.listeningSocket);
 		WSACleanup();
 		return 1;
+	}
+
+	//crear els fils de procés
+	GetSystemInfo(&systemInfo);
+	workerCount = systemInfo.dwNumberOfProcessors;
+	for(DWORD i = 0; i < workerCount; i++) {
+		HANDLE hThread = CreateThread(nullptr, 0, WorkerThread, &serverContext, 0, nullptr);
+		if(hThread != nullptr) {
+			hWorkersVector.push_back(hThread);
+		}
+		else {
+			cout << "Error en crear el procès #" << i << endl;
+		}
 	}
 }
