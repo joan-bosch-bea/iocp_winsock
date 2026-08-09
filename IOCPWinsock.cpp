@@ -16,8 +16,6 @@ struct SERVER_CONTEXT {
 int main() {
 	WSADATA wsaData;
 	sockaddr_in serverAddress{};
-	SYSTEM_INFO systemInfo;
-	DWORD workerCount;
 	vector<HANDLE> hWorkersVector;
 	SERVER_CONTEXT serverContext;
 
@@ -48,6 +46,15 @@ int main() {
 	//iniciar l'escolta
 	if(listen(serverContext.listeningSocket, SOMAXCONN) == SOCKET_ERROR) {
 		cout << "Error en iniciar escolta" << endl;
+		closesocket(serverContext.listeningSocket);
+		WSACleanup();
+		return 1;
+	}
+
+	//crear IOCP
+	serverContext.hCompletionPort = CreateIoCompletionPort(INVALID_HANDLE_VALUE, nullptr, 0, 0);
+	if(serverContext.hCompletionPort == nullptr) {
+		cout << "Error en crear IOCP" << endl;
 		closesocket(serverContext.listeningSocket);
 		WSACleanup();
 		return 1;
