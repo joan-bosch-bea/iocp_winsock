@@ -76,3 +76,44 @@ Per ara no fa res, simplement retorna 0 sense interaccionar ni amb el IOCP ni am
 
 **Important** Hi ha un fet remarcable que cal tenir present en el model mental a l'hora de dissenyar el *worker*: el fil no gestionarà un socket concret, sinó que es crearà un procés i se li assignarà un socket de treball, una operació i un estat de l'operació; això vol dir que no serà un fil que gestionarà la vida d'una connexió, sinó que gestionarà parts del cicle d'un o varis sockets que entraran de forma concurrent.
 
+## 8. Identificar el flux de dades del procés
+En aquest punt del projecte el servidor encara no accepta cap client. Per poder gestionar els clients cal tenir clar el flux de dades, i cal tenir encara mes clar que a diferència dels sockets tradicionals el model IOCP permet que un mateix client tingui operacions de lectura i escriptura pendents, inclús es pot donar el cas que dos fils processin dues operacions diferents d'un mateix client. Per tant ara és el moment d'incloure la relació d'estructures que permetin fer la gestió que respon a les següents preguntes: 
+
+- Qui és el client?
+- Quina operació requereix aquest client?
+
+Estableixo la nomenclatura del *context* per identificar i separar àmbits de referència de dades; declararé tres estructures de context: la del servidor, la del client i la de l'operació asíncrona.
+
+- Context del servidor: per ara només hi tinc el port de finalització (iocp) i el socket d'escolta
+- Context del client: contindrà totes les dades referents al client, inicialment el socket de comunicació
+- Context d'operació asíncrona: contindrà totes les dades referents a l'operació sobre un client, per tant inclourà el context del client i la descripció d'un tipus d'operació.
+
+Per ara aquestes estructures seran les següents:
+```
+struct SERVER_CONTEXT {
+	HANDLE hCompletionPort = nullptr;
+	SOCKET listeningSocket = INVALID_SOCKET;
+};
+
+struct CLIENT_CONTEXT {
+	SOCKET socket = INVALID_SOCKET;
+};
+
+struct IO_CONTEXT {
+	OVERLAPPED overlapped{};
+	WSABUF buffer{};
+	IO_OPERATION operation;
+	CLIENT_CONTEXT *client = nullptr;
+};
+```
+I el tipus d'operació estarà identificada per aquest enum:
+```
+enum class IO_OPERATION {
+	ACCEPT,
+	READ,
+	WRITE
+};
+```
+
+
+
