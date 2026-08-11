@@ -6,12 +6,8 @@
 #include <Ws2tcpip.h>
 #include <vector>
 #include <iostream>
+#include "structs.h"
 using namespace std;
-
-struct SERVER_CONTEXT {
-	HANDLE hCompletionPort = nullptr;
-	SOCKET listeningSocket = INVALID_SOCKET;
-};
 
 DWORD WINAPI WorkerThread(LPVOID lpParam) {
 	SERVER_CONTEXT *lpServerContext = static_cast<SERVER_CONTEXT*>(lpParam);
