@@ -119,3 +119,38 @@ L'estructura *OVERLAPPED* està definida a *minwinbase.h* i en entorns Windows r
 
 El funcionament d'aquest OVERLAPPED és important. A nivell d'imatge mental es podria dir que OVERLAPPED és equivalent a un UNIQUE d'una base de dades, de manera que cada operació és identificada per una referència. Però el que fa especialment interessant la solució de Windows és que OVERLAPPED no necessita una taula d'assignacions (mapa), sinó que retorna directament l'adreça de memòria on està l'operació; això implica que no cal fer una cerca per trobar l'operació (millora de rendiment).
 
+## 10. Organització de memòria
+Per poder fer funcionar aquest esquema cal organitzar l'estructura del context de l'operació *IO_CONTEXT* d'una forma determinada: el primer component de l'estructura ha de ser l'OVERLAPPED, i la resta els que jo defineixo. L'estructura s'organitza en memòria de forma seqüencial a com estan declarats els seus membres:
+```
+struct IO_CONTEXT {
+	OVERLAPPED overlapped{};
+	WSABUF buffer{};
+	IO_OPERATION operation;
+	CLIENT_CONTEXT *client = nullptr;
+};
+```
+El bloc de l'estructura es guardarà en memòria a la mateixa adressa que el seu primer membre, que en aquest cas és OVERLAPPED. Com que OVERLAPED serà l'adressa de memòria de l'operació posteriorment es pot accedir als components de l'estructura accedint a l'adressa de memòria de l'OVERLAPPED; de fet C++ ja incorpora la macro *CONTAINING_RECORD* que permet fer exactament el pas d'identificar a quin objecte pertany un membre.
+
+## 11. Vida de IO_CONTEXT
+L'estructura IO_CONTEXT ha d'existir en memòria des de que es llença el procés fins, com a mínim, que acabi; per tant això afecta al disseny. Cal separar el context del client del context de l'operació: el context del client es considera de llarga durada, en canvi el context de l'operació es considera de curta durada. Això implica que el context del client no es pot destruir fins que no hagin acabat totes les operacions pendents relacionades amb aquell client.
+La idea bàsica és que una connexió (client) pot tenir moltes operacions al llarg de la seva vida, i cada operació tindrà el seu propi context amb el seu propi OVERLAPPED.
+
+## 12. Esquema de GetQueuedCompletionStatus
+Abans d'implementar mes codi encara falta entendre que fa la funció *GetQueuedCompletionStatus()* i per què és important. Aquesta funció fa que el worker pugui esperar a que una operació I/O finalitzi. Aquesta funció està escoltant els moviment sobre la cua de *completions* (la cua de tasques completades). Té varis arguments, però els més rellevants son:
++ HANDLE CompletionPort: és l'iocp que s'està utilitzant
++ LPDWORD lpNumberOfBytesTransferred: bytes que s'han intercanviat (llegit o escrit)
++ PULONG_PTR lpCompletionKey: informació pròpia que associo al HANDLE al moment de connectar al iocp
++ LPOVERLAPPED *lpOverlapped: zona de memòria de l'operació, tal com he explicat anteriorment als punts **9** i **10**
+
+El fet de treballar amb fils permet que aquest s'adormi fins que *GetQueuedCompletionStatus()* el desperta per processar l'operació. Aquesta és la diferència clau entre fer polling (gastar cpu) i bloquejar / desbloquejar fils.
+
+## 13. Clau de compleció (completion key)
+Al punt anterior he mencionat l'argument PULONG_PTR lpCompletionKey. En aquest punt vaig a revisar quin és exactament el seu paper en aquest esquema que he anat desgranant. La clau de compleció identifica l'objecte (HANDLE) associat al IOCP. No s'ha de confondre amb OVERLAPPED, que identifica l'operació.
+La clau de compleció és una clau que definiré jo dins del codi, i que s'utilitza per associar HANDLEs al port de compleció. Al codi per ara tinc aquesta crida:
+
+```
+serverContext.hCompletionPort = CreateIoCompletionPort(INVALID_HANDLE_VALUE, nullptr, 0, 0);
+```
+En aquesta linia de codi només es crea un iocp, però no se li envia cap socket. Per assignar un socket al IOCP utilitzaré la mateixa funció, excepte que enviaré (per ordre) el socket client, el port de compleció amb el que vull treballar, la clau de compleció i el valor 0. En el meu projecte utilitzaré com a clau de compleció un punter al context del client, d'aquesta manera podré recuperar el context del client en el que s'ha fet l'operació: la clau de compleció em donarà informació sobre el client i l'OVERLAPPED em donarà informació sobre l'operació. El fet d'enviar el punter al context del client com a clau de compleció m'estalviarà haver de gestionar una taula paral·lela (mapa) amb les relacions de clau de compleció - context de client; he seguit la mateixa filosofia del model del OVERLAPPED.
+
+
