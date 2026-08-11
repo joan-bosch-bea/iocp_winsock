@@ -114,6 +114,8 @@ enum class IO_OPERATION {
 	WRITE
 };
 ```
+## 9. Descripció d'OVERLAPPED
+L'estructura *OVERLAPPED* està definida a *minwinbase.h* i en entorns Windows representa una operació I/O que es duu a terme de forma asíncrona. La seva importància rau en el fet que permet identificar a qui pertanyen els resultats d'una operació asíncrona. És pot interpretar com una referència a l'operació o, dit d'una altra manera' és com internament Windows identifica una operació asíncrona.
 
-
+El funcionament d'aquest OVERLAPPED és important. A nivell d'imatge mental es podria dir que OVERLAPPED és equivalent a un UNIQUE d'una base de dades, de manera que cada operació és identificada per una referència. Però el que fa especialment interessant la solució de Windows és que OVERLAPPED no necessita una taula d'assignacions (mapa), sinó que retorna directament l'adreça de memòria on està l'operació; això implica que no cal fer una cerca per trobar l'operació (millora de rendiment).
 
