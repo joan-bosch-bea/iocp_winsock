@@ -153,4 +153,57 @@ serverContext.hCompletionPort = CreateIoCompletionPort(INVALID_HANDLE_VALUE, nul
 ```
 En aquesta linia de codi només es crea un iocp, però no se li envia cap socket. Per assignar un socket al IOCP utilitzaré la mateixa funció, excepte que enviaré (per ordre) el socket client, el port de compleció amb el que vull treballar, la clau de compleció i el valor 0. En el meu projecte utilitzaré com a clau de compleció un punter al context del client, d'aquesta manera podré recuperar el context del client en el que s'ha fet l'operació: la clau de compleció em donarà informació sobre el client i l'OVERLAPPED em donarà informació sobre l'operació. El fet d'enviar el punter al context del client com a clau de compleció m'estalviarà haver de gestionar una taula paral·lela (mapa) amb les relacions de clau de compleció - context de client; he seguit la mateixa filosofia del model del OVERLAPPED.
 
+## 14. Preparar socket per AcceptEx
+La funció *AcceptEx* funciona d'una forma diferent a la funció *accept* del sockets tradicionals. La diferència principal és que mentre *accept* retorna un SOCKET, *AcceptEx* espera que se li proposi un SOCKET ja existent però no inicialitzat. Per tant el socket del client és crea abans d'acceptar el client, i, per tant, abans d'iniciar el procés asíncron que gestionarà el client, amb la qual cosa m'asseguro que sobrevisqui mentre no hagi finalitzat la gestió del client. Per aquest motiu afegeixo el nou SOCKET destinat a l'acceptació del client:
+
+```
+struct IO_CONTEXT {
+	OVERLAPPED overlapped{};
+	WSABUF buffer{};
+	IO_OPERATION operation;
+	CLIENT_CONTEXT *client = nullptr;
+	SOCKET acceptSocket = INVALID_SOCKET;
+};
+```
+
+Pel que fa a l'anàlisi del model que he implementat que respon a la pregunta: perquè l'*acceptSocket* que serà el socket de comunicació amb el client setà al IO_CONTEXT i no al CLIENT_CONTEXT? La pròpia funció *AcceptEx()* m'ha donat la resposta a aquesta pregunta: necessita un socket obert no lligat (bind) a cap adressa ni connectat. Per tant encara que després l'assigni al socket client aquesta variable a nivell general no està associada a cap client concret.
+
+## 15. La funció AcceptEx
+La definició de la funció *AcceptEx* es pot trobar a la pàgina de [documentació de Winsocks]([https://pages.github.com/](https://learn.microsoft.com/es-es/windows/win32/api/winsock/nf-winsock-acceptex)) i és la següent:
+
+> Esta función es una extensión específica de Microsoft para la especificación de Windows Sockets.
+
+El fet de ser una extensió vol dir que no es pot cridar directament, sinó que se n'ha d'obtenir un punter per poder-la cridar. Aquest punter s'ha d'obtenir cridant a la funció *WSAIoctl()*, també tal com s'indica a la [pàgina de referència de AcceptEx](https://learn.microsoft.com/es-es/windows/win32/api/winsock/nf-winsock-acceptex):
+
+> El puntero de función para la función AcceptEx debe obtenerse en tiempo de ejecución realizando una llamada a la función WSAIoctl con el código de operación SIO_GET_EXTENSION_FUNCTION_POINTER especificado. El búfer de entrada pasado a la función WSAIoctl debe contener WSAID_ACCEPTEX, un identificador único global (GUID) cuyo valor identifica la función de extensión AcceptEx . Si se ejecuta correctamente, la salida devuela por la función WSAIoctl contiene un puntero a la función AcceptEx. El GUID de WSAID_ACCEPTEX se define en el archivo de encabezado Mswsock.h
+
+Llavors la crida a *WSAIoctl* tindrà la següent forma:
+
+```
+WSAIoctl(
+	listeningSocket, //socket sobre el que vull l'extensió
+	SIO_GET_EXTENSION_FUNCTION_POINTER,//vull un punter a la funció
+	&guidAcceptEx,//identificador de la funció de la que en vull obtenir el punter
+	sizeof(guidAcceptEx),//tamany del valor anterior
+	&serverContext.lpfnAcceptEx,//destí del punter a la funció
+	sizeof(serverContext.lpfnAcceptEx),//tamany del destí anterior
+	&bytesReturned,//bytes escrits al buffer de sortida, en aquesta crida aquest valor no m'aportarà cap informació
+	nullptr, nullptr
+);
+```
+
+Un cop ja disposo del punter a la funció em faltrà encara el socket per acceptar les connexions (al codi serà l'*acceptSocket*), que al igual que he fet anteriorment amb el *listeningSocket* també el crearé amb *WSASocket()*, i, de fet, el crearé amb els mateixos paràmetres:
+
+```
+serverContext.listeningSocket = WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, nullptr, 0, WSA_FLAG_OVERLAPPED);
+acceptSocket = WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, nullptr, 0, WSA_FLAG_OVERLAPPED);
+```
+
+La clau d'aquests dos sockets i la funció *AcceptEx()* passa per entendre correctament la seva relació: la funció *AcceptEx()* agafarà una connexió que arribi al *listeningSocket* i farà que l'*acceptSocket* passi a representar aquesta connexió.
+
+En aquest punt encara no tinc cap socket associat al iocp, per tant abans de poder cridar a *AcceptEx()* hauré de fer aquesta assignació. Amb la mateixa funció que he utilitzat anteriorment *CreateIoCompletionPort()* amb un socket no vàlid per crear l'IOCP, ara la torno a cridar però indicant-li que vull utilitzar el nou socket *acceptSocket* al port de compleció (també creat anteriorment) *serverContext.hCompletionPort*:
+
+```
+CreateIoCompletionPort(reinterpret_cast<HANDLE>(acceptSocket), serverContext.hCompletionPort, 0, 0)
+```
 
