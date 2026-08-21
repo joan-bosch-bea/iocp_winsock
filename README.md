@@ -178,7 +178,6 @@ El fet de ser una extensió vol dir que no es pot cridar directament, sinó que 
 > El puntero de función para la función AcceptEx debe obtenerse en tiempo de ejecución realizando una llamada a la función WSAIoctl con el código de operación SIO_GET_EXTENSION_FUNCTION_POINTER especificado. El búfer de entrada pasado a la función WSAIoctl debe contener WSAID_ACCEPTEX, un identificador único global (GUID) cuyo valor identifica la función de extensión AcceptEx . Si se ejecuta correctamente, la salida devuela por la función WSAIoctl contiene un puntero a la función AcceptEx. El GUID de WSAID_ACCEPTEX se define en el archivo de encabezado Mswsock.h
 
 ## 15.1. Obtenir punter a l'extensió d'AcceptEx
-
 Tal com he comentat al punt anterior no es pot accedir directament a la funció *AcceptEx()*, sinó que s'ha de fer la crida a través d'un punter que puc obtenir des de *WSAIoctl()*. La crida a *WSAIoctl* tindrà la següent forma:
 
 ```
@@ -195,7 +194,6 @@ WSAIoctl(
 ```
 
 ## 15.2. Crear accept socket
-
 Un cop ja disposo del punter a la funció em faltrà encara el socket per acceptar les connexions (al codi serà l'*acceptSocket*), que al igual que he fet anteriorment amb el *listeningSocket* també el crearé amb *WSASocket()*, i, de fet, el crearé amb els mateixos paràmetres:
 
 ```
@@ -206,7 +204,6 @@ acceptSocket = WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, nullptr, 0, WSA_FLAG
 La clau d'aquests dos sockets i la funció *AcceptEx()* passa per entendre correctament la seva relació: la funció *AcceptEx()* agafarà una connexió que arribi al *listeningSocket* i farà que l'*acceptSocket* passi a representar aquesta connexió.
 
 ## 15.3. Associar l'accept socket al port de compleció
-
 En aquest punt encara no tinc cap socket associat al iocp, per tant abans de poder cridar a *AcceptEx()* hauré de fer aquesta assignació. Amb la mateixa funció que he utilitzat anteriorment *CreateIoCompletionPort()* amb un socket no vàlid per crear l'IOCP, ara la torno a cridar però indicant-li que vull utilitzar el nou socket *acceptSocket* al port de compleció (també creat anteriorment) *serverContext.hCompletionPort*:
 
 ```
@@ -216,7 +213,6 @@ CreateIoCompletionPort(reinterpret_cast<HANDLE>(acceptSocket), serverContext.hCo
 Un cop feta aquesta crida a *CreateIoCompletionPort()* totes les notificacions d'operacions sobreposades sobre el socket *acceptSocket* s'enviaran al port de compleció *serverContext.hCompletionPort*. El tercer argument és la **clau de compleció**: aquest clau de compleció em servirà per identificar la connexió del client, però com que de moment no en tinc cap puc indicar el valor 0 per defect. I finalment quart argument és el nombre màxim de processos que el sistema permetrà executar de forma concurrent, i el valor 0 equival al nombre de nuclis del processador.
 
 ## 15.4. Instanciar IO_CONTEXT
-
 El *IO_CONTEXT* del meu projecte és una estructura que representa una operació (qualsevol) d'entrada / sortida (I/O) pendent. Tal com he comentat al punt 10 l'organització dels membres d'aquesta estructura no és aleatòria, sinó que respon al meu esquema de disseny (es pot fer d'altres formes). Per tant creo una instància de *IO_CONTEXT* amb l'operació pendent *IO_OPERATION::ACCEPT* i l'*acceptSocket* que he creat al punt 15.2:
 
 ```
@@ -230,8 +226,7 @@ En aquest punt cal matissar una cosa important: l'operació *AcceptEx()* no util
 També en aquest punt hi ha una decisió de disseny important que ja he comentat anteriorment només de passada: el IO_CONTEXT ha de persistir fins que hagi finalitzat l'operació, per tant qui serà l'encarregat de crear-lo i eliminar-lo? I quan? El fer d'implementar un servidor d'alt rendiment implica no abusar d'operacions *new / delete*, sinó que el mes convenient és utilitzar un pool de contextes reutilitzables previament creats. Però per ara em permeto la llicència de centrar-me en la implementació funcional del model IOCP i deixar la implementació del pool de contextes per una posterior millora del projecte.
 
 ## 15.5. Cridar a AcceptEx
-
-És important entendre exactament la funció *AcceptEx()*, sobretot els arguments que espera. La seva signatura es pot trobar a l'[API de Win32]([https://pages.github.com/](https://learn.microsoft.com/en-us/windows/win32/api/winsock/nf-winsock-acceptex)), i és la següent:
+És important entendre exactament la funció *AcceptEx()*, sobretot els arguments que espera. La seva signatura es pot trobar a l'[API de Win32](https://learn.microsoft.com/ca-es/windows/win32/api/winsock/nf-winsock-acceptex), i és la següent:
 
 ```
 BOOL AcceptEx(
@@ -246,5 +241,29 @@ BOOL AcceptEx(
 );
 ```
 
+Els dos primers arguments son molt evidents: **sListenSocketel** és el socket d'escolta (la porta d'entrada al servidor), i **sAcceptSocket** és el socket acceptat (client entrant). Son els mateixos que utilitzaria en un servidor normal.
+**lpOutputBuffer** és on es rep informació de la connexió, que pot ser: l'adreça local, l'adreça remota i opcionalment dades que el client envia immediatament després de connectar.
+**dwReceiveDataLength** té a veure amb l'argument anterior: indica el nombre de bytes que es volen rebre (o mes ben dit, intentar rebre) del client juntament amb l'acceptació de connexió. En aquest projecte jo indicaré que durant l'acceptació de connexió entrant no vull rebre cap dada extra, ja faré les operacions de lectura després.
+**dwLocalAddressLength** és el nombre de bytes que es guarden dins de **lpOutputBuffer** per guardar l'adreça local. Això em porta a la constant **ADDRESS_BUFFER_SIZE** i al membre **char acceptBuffer[ACCEPT_BUFFER_SIZE]{}** de l'estructura *IO_CONTEXT*: l'API de Windows indica explícitament que aquest buffer ha de ser suficient per l'adreça mes 16 bytes addicionals. Per tant al **+16** no és un valor aleatori ni orientatiu ni ajustable després de fer proves.
+**dwRemoteAddressLength** és el mateix que l'anterior però per l'adreça remota.
+**lpdwBytesReceived** aquí es guardarien el nombre de bytes rebuts, però com que és una operació sobreposada (OVERLAPPED) quan aquesta funció retorni no sabré quants bytes he rebut, sinó que m'hauré d'esperar a la notificació d'operació i recuperar-los amb *GetQueuedCompletionStatus()*; entraré amb mes detall sobre aquest punt mes endavant.
+**lpOverlapped** és l'argument que dona sentit a l'operació sobreposada (OVERLAPPED), i, de fet, és el que converteix la crida a *AcceptEx()* en una operació asincrona. Tal com he comentat anteriorment quan l'operació sobreposada acabi IOCP em permetrà accedir a aquest OVERLAPPED i des d'aquest recuperar l'espai de memòria del IO_CONTEXT. Personalment trobo aquest punt molt brillant.
 
+Ara que ja he analitzat amb detall els arguments ja puc implementar la crida al punter a *AcceptEx()*:
 
+```
+result = serverContext.lpfnAcceptEx(serverContext.listeningSocket, ioContext->acceptSocket, ioContext->acceptBuffer, 0, ADDRESS_BUFFER_SIZE, ADDRESS_BUFFER_SIZE, &bytesReceived, &ioContext->overlapped);
+```
+
+Ara que he analitzat tots els arguments, en la crida anterior només hi ha un punt que pot semblar interessant (a excepció del OVERLAPPED, clar): indico per separat els bytes que he reservat per a l'adreça local i per l'adreça remota. I tornant a les constants **ADDRESS_BUFFER_SIZE** i **ACCEPT_BUFFER_SIZE**, una indica quants bytes vull reservar per cada adreça (podrien ser diferents), i l'altre quants bytes vull reservar per les dues adreces alhora que es tal com ho guardarà *AcceptEx()*, una adreça després de l'altra; per això és important separar aquestes dues longituds.
+
+## 15.6. Valor de retorn d'AcceptEx
+Com que és una funció sobreposada (overlaped) el valor de retorn no es pot avaluar de forma directa tal com hauria pensat inicialment: true vol dir tot correcte i false vol dir que s'ha produït un error. Contra tot pronòstic el valor de retorn *TRUE* indica que l'operació s'ha completat immediatament, i això és un cas poc habitual en IOCP. En canvi quan el valor de retorn és *FALSE* caldrà contrastar amb el valor de **WSAGetLastError()**:
+	+ result == FALSE && WSAGetLastError() == ERROR_IO_PENDING significa que no hi ha hagut cap error, sinó que és el cas més habitual: significa que s'ha iniciat l'operació d'acceptació de nova connexió entrant però al moment de retornar la funció aquesta acceptació encara està en procés.
+	+ result == FALSE && WSAGetLastError() != ERROR_IO_PENDING significa que s'ha produït un error i l'operació no s'ha pogut iniciar correctament.
+
+## 15.7. Gestió de IO_CONTEXT després d'AcceptEx
+En cas que la funció retorni sense cap error (és a dir, retorna TRUE o retorna FALSE amb ERROR_IO_PENDING) és un bon moment per revisar que s'ha de fer amb l'IO_CONTEXT. No es pot destruïr, ja que WIndows de forma interna encara hi està treballant, necessita que l'adreça de memòria sigui accessible des de l'aplicació. Per tant per una banda no he d'eliminar el IO_CONTEXT, i per l'altra no he de tancar el socket ja que l'operació d'acceptació encara no ha finalitzat (quan retorna TRUE si que ha finalitzat, però no s'ha acabat el treball amb el client). A més és important remarcar que no es pot tornar a cridar AcceptEx amb al el mateix IO_CONTEXT. El IO_CONTEXT que he utilitzat el deixo pendent i ja el recuperaré quan arribi la notificació al port de compleció dins del procés del worker.
+
+## 16 WorkerThread
+Si tot ha funcionat correctament, ara ja tinc el procés d'acceptació en marxa; quan acabi enviarà una notificació al port de compleció, i aquest port de compleció despertarà el procés que tinc al **WorkerThread**. Per tant és ara quan entra en joc el worker.
