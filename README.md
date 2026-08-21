@@ -177,7 +177,9 @@ El fet de ser una extensió vol dir que no es pot cridar directament, sinó que 
 
 > El puntero de función para la función AcceptEx debe obtenerse en tiempo de ejecución realizando una llamada a la función WSAIoctl con el código de operación SIO_GET_EXTENSION_FUNCTION_POINTER especificado. El búfer de entrada pasado a la función WSAIoctl debe contener WSAID_ACCEPTEX, un identificador único global (GUID) cuyo valor identifica la función de extensión AcceptEx . Si se ejecuta correctamente, la salida devuela por la función WSAIoctl contiene un puntero a la función AcceptEx. El GUID de WSAID_ACCEPTEX se define en el archivo de encabezado Mswsock.h
 
-Llavors la crida a *WSAIoctl* tindrà la següent forma:
+## 15.1. Obtenir punter a l'extensió d'AcceptEx
+
+Tal com he comentat al punt anterior no es pot accedir directament a la funció *AcceptEx()*, sinó que s'ha de fer la crida a través d'un punter que puc obtenir des de *WSAIoctl()*. La crida a *WSAIoctl* tindrà la següent forma:
 
 ```
 WSAIoctl(
@@ -192,14 +194,18 @@ WSAIoctl(
 );
 ```
 
+## 15.2. Crear accept socket
+
 Un cop ja disposo del punter a la funció em faltrà encara el socket per acceptar les connexions (al codi serà l'*acceptSocket*), que al igual que he fet anteriorment amb el *listeningSocket* també el crearé amb *WSASocket()*, i, de fet, el crearé amb els mateixos paràmetres:
 
 ```
-serverContext.listeningSocket = WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, nullptr, 0, WSA_FLAG_OVERLAPPED);
+serverContext.listeningSocket = WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, nullptr, 0, WSA_FLAG_OVERLAPPED);//linia de codi ja implementada anteriorment
 acceptSocket = WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, nullptr, 0, WSA_FLAG_OVERLAPPED);
 ```
 
 La clau d'aquests dos sockets i la funció *AcceptEx()* passa per entendre correctament la seva relació: la funció *AcceptEx()* agafarà una connexió que arribi al *listeningSocket* i farà que l'*acceptSocket* passi a representar aquesta connexió.
+
+## 15.3. Associar l'accept socket al port de compleció
 
 En aquest punt encara no tinc cap socket associat al iocp, per tant abans de poder cridar a *AcceptEx()* hauré de fer aquesta assignació. Amb la mateixa funció que he utilitzat anteriorment *CreateIoCompletionPort()* amb un socket no vàlid per crear l'IOCP, ara la torno a cridar però indicant-li que vull utilitzar el nou socket *acceptSocket* al port de compleció (també creat anteriorment) *serverContext.hCompletionPort*:
 
@@ -208,3 +214,37 @@ CreateIoCompletionPort(reinterpret_cast<HANDLE>(acceptSocket), serverContext.hCo
 ```
 
 Un cop feta aquesta crida a *CreateIoCompletionPort()* totes les notificacions d'operacions sobreposades sobre el socket *acceptSocket* s'enviaran al port de compleció *serverContext.hCompletionPort*. El tercer argument és la **clau de compleció**: aquest clau de compleció em servirà per identificar la connexió del client, però com que de moment no en tinc cap puc indicar el valor 0 per defect. I finalment quart argument és el nombre màxim de processos que el sistema permetrà executar de forma concurrent, i el valor 0 equival al nombre de nuclis del processador.
+
+## 15.4. Instanciar IO_CONTEXT
+
+El *IO_CONTEXT* del meu projecte és una estructura que representa una operació (qualsevol) d'entrada / sortida (I/O) pendent. Tal com he comentat al punt 10 l'organització dels membres d'aquesta estructura no és aleatòria, sinó que respon al meu esquema de disseny (es pot fer d'altres formes). Per tant creo una instància de *IO_CONTEXT* amb l'operació pendent *IO_OPERATION::ACCEPT* i l'*acceptSocket* que he creat al punt 15.2:
+
+```
+ioContext = new IO_CONTEXT();
+ioContext->operation = IO_OPERATION::ACCEPT;
+ioContext->acceptSocket = acceptSocket;
+```
+
+En aquest punt cal matissar una cosa important: l'operació *AcceptEx()* no utilitza el membre *WSABUF buffer{}* de l'estructura *IO_CONTEXT*, però les crides a *WSARecv()* i *WSASend()* si que el necessitaran; per tant m'avanço una mica als esdeveniments i ja deixo aquest membre dins l'estructura. El mateix passa amb *CLIENT_CONTEXT*.
+
+També en aquest punt hi ha una decisió de disseny important que ja he comentat anteriorment només de passada: el IO_CONTEXT ha de persistir fins que hagi finalitzat l'operació, per tant qui serà l'encarregat de crear-lo i eliminar-lo? I quan? El fer d'implementar un servidor d'alt rendiment implica no abusar d'operacions *new / delete*, sinó que el mes convenient és utilitzar un pool de contextes reutilitzables previament creats. Però per ara em permeto la llicència de centrar-me en la implementació funcional del model IOCP i deixar la implementació del pool de contextes per una posterior millora del projecte.
+
+## 15.5. Cridar a AcceptEx
+
+És important entendre exactament la funció *AcceptEx()*, sobretot els arguments que espera. La seva signatura es pot trobar a l'[API de Win32]([https://pages.github.com/](https://learn.microsoft.com/en-us/windows/win32/api/winsock/nf-winsock-acceptex)), i és la següent:
+
+```
+BOOL AcceptEx(
+  [in]  SOCKET       sListenSocket,
+  [in]  SOCKET       sAcceptSocket,
+  [in]  PVOID        lpOutputBuffer,
+  [in]  DWORD        dwReceiveDataLength,
+  [in]  DWORD        dwLocalAddressLength,
+  [in]  DWORD        dwRemoteAddressLength,
+  [out] LPDWORD      lpdwBytesReceived,
+  [in]  LPOVERLAPPED lpOverlapped
+);
+```
+
+
+
