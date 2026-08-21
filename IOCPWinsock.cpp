@@ -4,6 +4,7 @@
 
 #include <winsock2.h>
 #include <Ws2tcpip.h>
+#include <mswsock.h>
 #include <vector>
 #include <iostream>
 #include "structs.h"
@@ -26,6 +27,9 @@ int main() {
 	SERVER_CONTEXT serverContext;
 	SYSTEM_INFO systemInfo;
 	DWORD workerCount;
+	IO_CONTEXT *ioContext;
+	BOOL result;
+	DWORD bytesReceived = 0;
 
 	//inicialitza winsock
 	if(WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
@@ -59,6 +63,16 @@ int main() {
 		return 1;
 	}
 
+	//obtenir punter a acceptex
+	GUID guidAcceptEx = WSAID_ACCEPTEX;
+	DWORD bytesReturned = 0;
+	if(WSAIoctl(serverContext.listeningSocket, SIO_GET_EXTENSION_FUNCTION_POINTER, &guidAcceptEx, sizeof(guidAcceptEx), &serverContext.lpfnAcceptEx, sizeof(serverContext.lpfnAcceptEx), &bytesReturned, nullptr, nullptr) == SOCKET_ERROR) {
+		cout << "Error obtenint AcceptEx: " << WSAGetLastError() << endl;
+		closesocket(serverContext.listeningSocket);
+		WSACleanup();
+		return 1;
+	}
+
 	//crear IOCP
 	serverContext.hCompletionPort = CreateIoCompletionPort(INVALID_HANDLE_VALUE, nullptr, 0, 0);
 	if(serverContext.hCompletionPort == nullptr) {
@@ -78,6 +92,45 @@ int main() {
 		}
 		else {
 			cout << "Error en crear el procès #" << i << endl;
+		}
+	}
+
+	//socket per acceptex
+	SOCKET acceptSocket = WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, nullptr, 0, WSA_FLAG_OVERLAPPED);
+	if(acceptSocket == INVALID_SOCKET) {
+		cout << "Error en crear accept socket" << endl;
+		closesocket(serverContext.listeningSocket);
+		WSACleanup();
+		return 1;
+	}
+
+	//associar acceptSocket a iocp
+	if(CreateIoCompletionPort(reinterpret_cast<HANDLE>(acceptSocket), serverContext.hCompletionPort, 0, 0) == nullptr) {
+		cout << "Error associant acceptSocket a IOCP" << endl;
+		closesocket(acceptSocket);
+		closesocket(serverContext.listeningSocket);
+		CloseHandle(serverContext.hCompletionPort);
+		WSACleanup();
+		return 1;
+	}
+
+	//instanciar IO_CONTEXT
+	ioContext = new IO_CONTEXT();
+	ioContext->operation = IO_OPERATION::ACCEPT;
+	ioContext->acceptSocket = acceptSocket;
+
+	//cridar a AcceptEx
+	result = serverContext.lpfnAcceptEx(serverContext.listeningSocket, ioContext->acceptSocket, ioContext->acceptBuffer, 0, ADDRESS_BUFFER_SIZE, ADDRESS_BUFFER_SIZE, &bytesReceived, &ioContext->overlapped);
+	if(result) {
+		cout << "AcceptEx completat immediatament" << endl;
+	}
+	else {
+		DWORD error = WSAGetLastError();
+		if(error == ERROR_IO_PENDING) {
+			cout << "AcceptEx pendent..." << endl;
+		}
+		else {
+			cout << "Error en AcceptEx: " << error << endl;
 		}
 	}
 }
