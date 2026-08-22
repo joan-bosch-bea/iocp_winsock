@@ -4,6 +4,16 @@ Creació des de zero d'un servidor d'alt rendiment per a sistemes Windows amb I/
 # Objectiu
 L'objectiu d'aquest projecte és construir el servidor documentant cada pas i explicant les diferents parts de la implementació per entendre com funciona l'arquitectura d'IOCP i com es pot utilitzar per gestionar comunicacions de xarxa de manera asíncrona i concurrent.
 
+# Fonaments d'IOCP
+**IOCP** (Input Output Completion port) és un mecanisme propi del nucli de Windows que permet associar operacions d'I/O asíncrones amb una cua de complecions, i també permet que diversos processos accedeixin a aquesta cua per processar-les. La paraula *port* de IOCP fa referència al terme que Windows utilitza per identificar el sistema de distribució (i sincronització) de les notificacions de finalitzacions de processos asíncrons.
+**Completion** (o compleció) és el resultat d'una operació asíncrona d'entrada / sortida que el sistema Windows posa a la cua de l'IOCP quan aquesta ha finalitzat.
+
+Per tant es pot simplificar el model de funcionament dient que primer es genera una operació d'I/O asíncrona; la funció que registra l'operació asíncrona finalitza immediatament però no l'operació en si. Quan l'operació acaba s'envia una notificació junt amb les dades de l'operació al port de compleció (prèviament preparat), i un procediment (o varis) accedeixen a la cua de notificacions d'operacions finalitzades per processar els resultats. Aquest processament pot generar noves operacions asíncrones que al seu moment finalitzaran i seran enviades a la cua de complecions i un procediment (el mateix o un altre) processarà aquest resultat.
+
+Les operacions asíncrones porten vinculades les dades necessàries per fer tot el seguiment i persisteixen durant tota l'operació. En el cas del servidor les dades importants son la zona de memòria on s'executa l'operació i les dades del client; com que es pot donar el cas que per servir una petició d'un client calguin varies operacions d'IO asincrones, caldrà que la seva informació persisteixi fins al final del procés. Per tant cada com que el procediment recupera les dades de l'operació i n'inicia una de nova vinculada al mateix client (per exemple llegeix el request però no el reb tot, ha d'iniciar una nova operació de lectura) ha de propagar les dades del client a la nova operació per a que el proper procediment pugui identificar el client i la situació en que es troba.
+
+És un model que consumeix pocs recursos de CPU, ja que enlloc de fer *polling* esperant una notificació utilitza una funció que literalment desperta el procediment, de manera que els procediments esperen de forma passiva a ser despertats.
+
 # Desenvolupament
 ## 1. Inicialitzar winsock
 Habilitar la funcionalitat de winsock per accedir als recursos de xarxa. És el procés estàndard, no hi ha cap diferència amb el que hauria fet per treballar sense IOCP.
@@ -120,7 +130,7 @@ L'estructura *OVERLAPPED* està definida a *minwinbase.h* i en entorns Windows r
 El funcionament d'aquest OVERLAPPED és important. A nivell d'imatge mental es podria dir que OVERLAPPED és equivalent a un UNIQUE d'una base de dades, de manera que cada operació és identificada per una referència. Però el que fa especialment interessant la solució de Windows és que OVERLAPPED no necessita una taula d'assignacions (mapa), sinó que retorna directament l'adreça de memòria on està l'operació; això implica que no cal fer una cerca per trobar l'operació (millora de rendiment).
 
 ## 10. Organització de memòria
-Per poder fer funcionar aquest esquema cal organitzar l'estructura del context de l'operació *IO_CONTEXT* d'una forma determinada: el primer component de l'estructura ha de ser l'OVERLAPPED, i la resta els que jo defineixo. L'estructura s'organitza en memòria de forma seqüencial a com estan declarats els seus membres:
+Per poder fer funcionar aquest esquema cal organitzar l'estructura del context de l'operació *IO_CONTEXT* d'una forma determinada: el primer component de l'estructura ha de ser l'OVERLAPPED, i la resta els que jo defineixo. L'estructura s'organitza en memòria de forma seqüencial a com estan declarats els seus membres (el compilador pot afegir padding entre els membres):
 ```
 struct IO_CONTEXT {
 	OVERLAPPED overlapped{};
@@ -266,4 +276,78 @@ Com que és una funció sobreposada (overlaped) el valor de retorn no es pot ava
 En cas que la funció retorni sense cap error (és a dir, retorna TRUE o retorna FALSE amb ERROR_IO_PENDING) és un bon moment per revisar que s'ha de fer amb l'IO_CONTEXT. No es pot destruïr, ja que WIndows de forma interna encara hi està treballant, necessita que l'adreça de memòria sigui accessible des de l'aplicació. Per tant per una banda no he d'eliminar el IO_CONTEXT, i per l'altra no he de tancar el socket ja que l'operació d'acceptació encara no ha finalitzat (quan retorna TRUE si que ha finalitzat, però no s'ha acabat el treball amb el client). A més és important remarcar que no es pot tornar a cridar AcceptEx amb al el mateix IO_CONTEXT. El IO_CONTEXT que he utilitzat el deixo pendent i ja el recuperaré quan arribi la notificació al port de compleció dins del procés del worker.
 
 ## 16 WorkerThread
-Si tot ha funcionat correctament, ara ja tinc el procés d'acceptació en marxa; quan acabi enviarà una notificació al port de compleció, i aquest port de compleció despertarà el procés que tinc al **WorkerThread**. Per tant és ara quan entra en joc el worker.
+Si tot ha funcionat correctament, ara ja tinc el procés d'acceptació en marxa; quan acabi d'executar-se la funció asíncrona que he llençat al pas anterior arribarà una notificació al port de compleció, i aquest port de compleció despertarà el procés que tinc al **WorkerThread**. Per tant és ara quan entra en joc el worker. Tal com he descrit anteriorment el worker no consumeix cpu esperant que hi hagi una notificació disponible, sinó que queda bloquejat mentres no hi ha notificacions de complecions disponibles. Per posar el procediment en espera mentres no hi ha complecions disponibles s'utilitza la funció *GetQueuedCompletionStatus()*, implemento ja la crida dins del procediment:
+
+```
+DWORD WINAPI WorkerThread(LPVOID lpParam) {
+	SERVER_CONTEXT *lpServerContext = static_cast<SERVER_CONTEXT*>(lpParam);
+	DWORD bytesTransferred = 0;
+	ULONG_PTR completionKey = 0;
+	OVERLAPPED *pOverlapped = nullptr;
+	BOOL result;
+
+	result = GetQueuedCompletionStatus(lpServerContext->hCompletionPort, &bytesTransferred, &completionKey, &pOverlapped, INFINITE);
+
+	return 0;
+}
+```
+
+## 16.1. Valor de retorn de GetQueuedCompletionStatus
+El primer pas després del retorn de la funció és comprovar el propi valor de retorn. Pot retornar TRUE i FALSE. Si retorna TRUE vol dir que la funció ha finalitzat correctament, i ja es pot gestionar el següent pas. En canvi si retorna FALSE no vol dir que simplement ha fallat i cal oblidar-se'n, sinó que cal comprovar si realment ha arribat una compleció. Si el retorn és FALSE i ha arribat una compleció caldrà gestionar-la correctament ja que estarà apuntant a una adreça de memòria vàlida que caldrà alliberar correctament quan acabi tota la gestió d'aquell client. En cas que *GetQueuedCompletionStatus* retorni FALSE i *pOverlapped* no sigui nul voldrà dir que l'operació associada ha fallat. Per tant modifico una mica la crida a *GetQueuedCompletionStatus*:
+
+```
+//espera indefinidament que arribi la notificació d'una compleció
+if(!(result = GetQueuedCompletionStatus(lpServerContext->hCompletionPort, &bytesTransferred, &completionKey, &pOverlapped, INFINITE))) {
+	if(pOverlapped == nullptr) {
+		//error intern en la pròpia GetQueuedCompletionStatus
+	}
+	else {
+		//error en l'operació associada
+	}
+}
+else {
+	//operació associada finalitzada correctament
+}
+```
+
+Ara veig que tal com està plantejat el procediment, aquest mor si o si després del retorn de *GetQueuedCompletionStatus*. Per no perdre els workers he de cridar *GetQueuedCompletionStatus* dins d'un bucle. Preveig ara que no serà un bucle infinit, sinó que l'hauré de poder controlar per finalitzar correctament el servidor. Però això son implementacions posteriors. Per ara només m'interessa avaluar els casos d'error o èxit i veure com gestionar l'operació completada. L'únic cas clar que hi ha ara és quan la funció retorna FALSE i el punter a OVERLAPED és nul: està clar que no puc reintentar la crida ja que el punter nul a l'adreça de memòria del OVERLAPPED m'impedeix recuperar el IO_CONTEXT. Per tant en aquest punt del projecte puc fer que en el cas que *GetQueuedCompletionStatus* retorni FALSE i el punter a OVERLAPPED sigui nul finalitzi el procediment retornant codi d'error 1:
+
+```
+//espera indefinidament que arribi la notificació d'una compleció
+if(!(result = GetQueuedCompletionStatus(lpServerContext->hCompletionPort, &bytesTransferred, &completionKey, &pOverlapped, INFINITE))) {
+	DWORD error = GetLastError();
+	if(pOverlapped == nullptr) {
+		//error intern en la pròpia GetQueuedCompletionStatus
+		cout << "Error en GetQueuedCompletionStatus: " << error << endl;
+		return 1;
+	}
+	else {
+		//error en l'operació associada
+	}
+}
+else {
+	//operació associada finalitzada correctament
+}
+```
+
+Això només es una solució temporal, ja que no m'interessa que vagin morint fils ni en cas d'error ni després de gestionar una operació finalitzada.
+
+## 16.2. OVERLAPPED rebut
+El *lpServerContext* és l'argument que envio al crear els fils del procés; tots els fils tindran el mateix context de servidor. Aquest context de servidor conté la instància del port de compleció del que vull rebre notificacions. Pot haver-n'hi mes d'un, però per fer aquest projecte i analitzar el funcionament només n'utilitzo un. El paràmetre *INFINITE* indica el temps que ha de durar l'inactivitat abans de reprendre. Si acaba el temps d'inactivitat sense que hi hagi disponible cap compleció la funció retorna FALSE i assigna NULL al paràmetre *lpOverlapped*. Si el temps d'espera és *INFINITE* la funció quedarà en espera de forma indefinida. Al manual de referència de la funció s'indica que la interpretació d'aquest temps d'espera varia segons la versió del sistema operatiu, però per aquest projecte en principi no m'afectarà.
+
+Quan la funció retorna obtenim 3 valors importants: *bytesTransferred*, *completionKey* i *pOverlapped*. D'aquests tres paràmetres el més immediat és **pOverlapped**. Quan crido a *lpfnAcceptEx()* li envio un punter al membre OVERLAPPED del IO_CONTEXT; el sistema s'encarrega d'assignar el valor a OVERLAPPED, i això afecta al disseny de l'estructura IO_CONTEXT i com s'utilitza per recuperar les dades de l'operació. Quan inicio l'operació asíncrona *lpfnAcceptEx()* li envio el punter al OVERLAPPED de l'estructura IO_CONTEXT. Aquest estructura IO_CONTEXT l'he creat amb *new* però no n'he fet cap delete. En condicions descontrolades una crida successiva a *new* implicaria una fuita de memòria (memory leak): reservo memòria en un punter, no l'allibero i després torno a reservar memòria sobre el mateix punter, i per tant no puc recuperar la zona de memòria del primer new. En aquest model el sistema desconeix que és IO_CONTEXT, però si que sap que és OVERLAPPED; i com que l'estructura es guarda en memòria de forma seqüencial (encara que el compilador pugui afegir padding entre els membres) i el primer membre de IO_CONTEXT és OVERLAPPED i en C++ l'adreça de memòria d'una estructura coincideix amb l'adreça de memòria del seu primer membre això implica que quan rebi la compleció i amb ella el OVERLAPPED sabré segur que l'adreça de meòria del OVERLAPPED rebut és la mateixa que l'adreça de memòria del IO_CONTEXT, amb la qual cosa el podré recuperar. Per això aquest paràmetre de retorn és imprescindible per la persistència de les dades de gestió del client en aquest model de servidor. Tal com he plantejat l'estructura del IO_CONTEXT el possible padding que pugui afegir el compilador entre els membres no afecta el funcionament, ja que el membre OVERLAPPED del que se l'adreça de memòria és el primer de l'estructura i per tant no tindrà padding previ.
+
+Sabent això ja puc recuperar l'estructura del context de l'operació *IO_CONTEXT*; C++ ja incorpora el mecanisme per recuperar tota l'estructura a partir de l'adreça del primer membre:
+
+```
+IO_CONTEXT *ioContext = reinterpret_cast<IO_CONTEXT*>(pOverlapped);
+```
+
+## 16.3. Clau de compleció rebuda
+La definició de la clau de compleció és: una dada definida pel programa que queda associada al handle quan aquest s'associa a l'IOCP i que Windows retorna al worker juntament amb la compleció. Això vol dir que puc disposar de dos mecanismes d'identificació: el OVERLAPPED i la clau de compleció. En el projecte que he plantejat creo el port de compleció amb la clau 0, ja que disposo del OVERLAPED per recuperar l'operació. Per tant ara mateix deixaré aquest valor per defecte a 0.
+
+## 16.4. Bytes transferits
+El següent paràmetre de la funció que m'interessa comprovar és *bytesTransferred*. El manual de referència diu que és el nombre de bytes transferits en una operació d'IO finalitzada correctament. Però l'operació que he llençat per rebre aquesta compleció és la de *AcceptEx* i aquí entra en joc el valor que he indicat al fer la crida a *AcceptEx* per indicar el nombre de bytes que permeto llegir de la primera tramesa del client. Com que a la meva crida he indicat que no espero rebre cap byte doncs ara aquest *bytesTransferred* no l'hauré de tenir en compte.
+
+## 17. Tractament dels retorn de GetQueuedCompletionStatus amb error
+
