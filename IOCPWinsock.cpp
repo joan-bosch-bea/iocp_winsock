@@ -12,10 +12,79 @@ using namespace std;
 
 DWORD WINAPI WorkerThread(LPVOID lpParam) {
 	SERVER_CONTEXT *lpServerContext = static_cast<SERVER_CONTEXT*>(lpParam);
+	IO_CONTEXT *lpIOContext;
+	BOOL bResult;
+	int iResult;
 
-	DWORD bytesTransferred = 0;//bytes transferits durant l'operació, si el client tanca la connexió els bytes son 0
-	ULONG_PTR completionKey = 0;
-	OVERLAPPED *pOverlapped = nullptr;//per diferenciar operacions pendents de lectura o escriptura
+	//mentres el serevidor estigui corrent
+	while(lpServerContext->running) {
+		DWORD bytesTransferred;
+		ULONG_PTR completionKey;
+		OVERLAPPED *pOverlapped;
+
+		//espera indefinidament que arribi la notificació d'una compleció
+		if(!(bResult = GetQueuedCompletionStatus(lpServerContext->hCompletionPort, &bytesTransferred, &completionKey, &pOverlapped, INFINITE))) {
+			DWORD error = GetLastError();
+			if(pOverlapped == nullptr) {
+				//error intern en la pròpia GetQueuedCompletionStatus
+				cout << "Error en GetQueuedCompletionStatus: " << error << endl;
+			}
+			else {
+				//error en l'operació associada, puc recuperar context io
+				lpIOContext = reinterpret_cast<IO_CONTEXT*>(pOverlapped);
+				cout << "Error en operacio I/O: " << error << endl;
+
+				//gestió segons cada cas d'operació
+				switch(lpIOContext->operation) {
+					case IO_OPERATION::ACCEPT: {
+						closesocket(lpIOContext->acceptSocket);
+						delete lpIOContext;
+					} break;
+					case IO_OPERATION::READ: {
+
+					} break;
+					case IO_OPERATION::WRITE: {
+
+					} break;
+				}
+			}
+		}
+		else if (completionKey == COMPLETION_KEY_SHUTDOWN && pOverlapped == nullptr) {
+			//ordre d'aturada des del main
+			break;
+		}
+		else {
+			//operació finalitzada correctament
+			lpIOContext = reinterpret_cast<IO_CONTEXT*>(pOverlapped);
+
+			//gestió segons cada cas d'operació
+			switch(lpIOContext->operation) {
+				case IO_OPERATION::ACCEPT: {
+					//modifica context del socket per vincular-lo al listening socket
+					iResult = setsockopt(lpIOContext->acceptSocket, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, reinterpret_cast<char*>(&lpServerContext->listeningSocket), sizeof(lpServerContext->listeningSocket));
+					if(iResult == SOCKET_ERROR) {
+						//error en modificar context
+						closesocket(lpIOContext->acceptSocket);
+						delete lpIOContext;
+					}
+					else {
+						//nova instancia de CLIENT_CONTEXT
+						CLIENT_CONTEXT *lpClientContext = new CLIENT_CONTEXT();
+						lpClientContext->socket = lpIOContext->acceptSocket;
+
+						//allibero IO_CONTEXT
+						delete lpIOContext;
+					}
+				} break;
+				case IO_OPERATION::READ: {
+
+				} break;
+				case IO_OPERATION::WRITE: {
+
+				} break;
+			}
+		}
+	}
 
 	return 0;
 }
@@ -27,7 +96,7 @@ int main() {
 	SERVER_CONTEXT serverContext;
 	SYSTEM_INFO systemInfo;
 	DWORD workerCount;
-	IO_CONTEXT *ioContext;
+	IO_CONTEXT *lpIOContext;
 	BOOL result;
 	DWORD bytesReceived = 0;
 
@@ -81,6 +150,7 @@ int main() {
 		WSACleanup();
 		return 1;
 	}
+	serverContext.running = true;
 
 	//crear els fils de procés
 	GetSystemInfo(&systemInfo);
@@ -95,32 +165,31 @@ int main() {
 		}
 	}
 
-	//socket per acceptex
-	SOCKET acceptSocket = WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, nullptr, 0, WSA_FLAG_OVERLAPPED);
-	if(acceptSocket == INVALID_SOCKET) {
+	//instanciar IO_CONTEXT
+	lpIOContext = new IO_CONTEXT();
+	lpIOContext->operation = IO_OPERATION::ACCEPT;
+	lpIOContext->acceptSocket = WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, nullptr, 0, WSA_FLAG_OVERLAPPED);
+	if(lpIOContext->acceptSocket == INVALID_SOCKET) {
 		cout << "Error en crear accept socket" << endl;
 		closesocket(serverContext.listeningSocket);
+		delete lpIOContext;
 		WSACleanup();
 		return 1;
 	}
 
 	//associar acceptSocket a iocp
-	if(CreateIoCompletionPort(reinterpret_cast<HANDLE>(acceptSocket), serverContext.hCompletionPort, 0, 0) == nullptr) {
+	if(CreateIoCompletionPort(reinterpret_cast<HANDLE>(lpIOContext->acceptSocket), serverContext.hCompletionPort, 0, 0) == nullptr) {
 		cout << "Error associant acceptSocket a IOCP" << endl;
-		closesocket(acceptSocket);
+		closesocket(lpIOContext->acceptSocket);
 		closesocket(serverContext.listeningSocket);
 		CloseHandle(serverContext.hCompletionPort);
+		delete lpIOContext;
 		WSACleanup();
 		return 1;
 	}
 
-	//instanciar IO_CONTEXT
-	ioContext = new IO_CONTEXT();
-	ioContext->operation = IO_OPERATION::ACCEPT;
-	ioContext->acceptSocket = acceptSocket;
-
 	//cridar a AcceptEx
-	result = serverContext.lpfnAcceptEx(serverContext.listeningSocket, ioContext->acceptSocket, ioContext->acceptBuffer, 0, ADDRESS_BUFFER_SIZE, ADDRESS_BUFFER_SIZE, &bytesReceived, &ioContext->overlapped);
+	result = serverContext.lpfnAcceptEx(serverContext.listeningSocket, lpIOContext->acceptSocket, lpIOContext->acceptBuffer, 0, ADDRESS_BUFFER_SIZE, ADDRESS_BUFFER_SIZE, &bytesReceived, &lpIOContext->overlapped);
 	if(result) {
 		cout << "AcceptEx completat immediatament" << endl;
 	}
