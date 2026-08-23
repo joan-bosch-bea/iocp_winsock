@@ -226,9 +226,9 @@ Un cop feta aquesta crida a *CreateIoCompletionPort()* totes les notificacions d
 El *IO_CONTEXT* del meu projecte és una estructura que representa una operació (qualsevol) d'entrada / sortida (I/O) pendent. Tal com he comentat al punt 10 l'organització dels membres d'aquesta estructura no és aleatòria, sinó que respon al meu esquema de disseny (es pot fer d'altres formes). Per tant creo una instància de *IO_CONTEXT* amb l'operació pendent *IO_OPERATION::ACCEPT* i l'*acceptSocket* que he creat al punt 15.2:
 
 ```
-ioContext = new IO_CONTEXT();
-ioContext->operation = IO_OPERATION::ACCEPT;
-ioContext->acceptSocket = acceptSocket;
+lpIOContext = new IO_CONTEXT();
+lpIOContext->operation = IO_OPERATION::ACCEPT;
+lpIOContext->acceptSocket = acceptSocket;
 ```
 
 En aquest punt cal matissar una cosa important: l'operació *AcceptEx()* no utilitza el membre *WSABUF buffer{}* de l'estructura *IO_CONTEXT*, però les crides a *WSARecv()* i *WSASend()* si que el necessitaran; per tant m'avanço una mica als esdeveniments i ja deixo aquest membre dins l'estructura. El mateix passa amb *CLIENT_CONTEXT*.
@@ -262,7 +262,7 @@ Els dos primers arguments son molt evidents: **sListenSocketel** és el socket d
 Ara que ja he analitzat amb detall els arguments ja puc implementar la crida al punter a *AcceptEx()*:
 
 ```
-result = serverContext.lpfnAcceptEx(serverContext.listeningSocket, ioContext->acceptSocket, ioContext->acceptBuffer, 0, ADDRESS_BUFFER_SIZE, ADDRESS_BUFFER_SIZE, &bytesReceived, &ioContext->overlapped);
+result = serverContext.lpfnAcceptEx(serverContext.listeningSocket, lpIOContext->acceptSocket, lpIOContext->acceptBuffer, 0, ADDRESS_BUFFER_SIZE, ADDRESS_BUFFER_SIZE, &bytesReceived, &lpIOContext->overlapped);
 ```
 
 Ara que he analitzat tots els arguments, en la crida anterior només hi ha un punt que pot semblar interessant (a excepció del OVERLAPPED, clar): indico per separat els bytes que he reservat per a l'adreça local i per l'adreça remota. I tornant a les constants **ADDRESS_BUFFER_SIZE** i **ACCEPT_BUFFER_SIZE**, una indica quants bytes vull reservar per cada adreça (podrien ser diferents), i l'altre quants bytes vull reservar per les dues adreces alhora que es tal com ho guardarà *AcceptEx()*, una adreça després de l'altra; per això és important separar aquestes dues longituds.
@@ -310,7 +310,7 @@ else {
 }
 ```
 
-Ara veig que tal com està plantejat el procediment, aquest mor si o si després del retorn de *GetQueuedCompletionStatus*. Per no perdre els workers he de cridar *GetQueuedCompletionStatus* dins d'un bucle. Preveig ara que no serà un bucle infinit, sinó que l'hauré de poder controlar per finalitzar correctament el servidor. Però això son implementacions posteriors. Per ara només m'interessa avaluar els casos d'error o èxit i veure com gestionar l'operació completada. L'únic cas clar que hi ha ara és quan la funció retorna FALSE i el punter a OVERLAPED és nul: està clar que no puc reintentar la crida ja que el punter nul a l'adreça de memòria del OVERLAPPED m'impedeix recuperar el IO_CONTEXT. Per tant en aquest punt del projecte puc fer que en el cas que *GetQueuedCompletionStatus* retorni FALSE i el punter a OVERLAPPED sigui nul finalitzi el procediment retornant codi d'error 1:
+Tal com està plantejat el procediment, aquest mor si o si després del retorn de *GetQueuedCompletionStatus*. Per no perdre els workers he de cridar *GetQueuedCompletionStatus* dins d'un bucle. Preveig que no serà un bucle infinit, sinó que l'hauré de poder controlar per finalitzar correctament el servidor. Però això son implementacions posteriors. Per ara només m'interessa avaluar els casos d'error o èxit i veure com gestionar l'operació completada. L'únic cas clar que hi ha ara és quan la funció retorna FALSE i el punter a OVERLAPED és nul: està clar que no puc reintentar la crida ja que el punter nul a l'adreça de memòria del OVERLAPPED m'impedeix recuperar el IO_CONTEXT. Per tant en aquest punt del projecte puc fer que en el cas que *GetQueuedCompletionStatus* retorni FALSE i el punter a OVERLAPPED sigui nul finalitzi el procediment retornant codi d'error 1:
 
 ```
 //espera indefinidament que arribi la notificació d'una compleció
@@ -340,7 +340,7 @@ Quan la funció retorna obtenim 3 valors importants: *bytesTransferred*, *comple
 Sabent això ja puc recuperar l'estructura del context de l'operació *IO_CONTEXT*; C++ ja incorpora el mecanisme per recuperar tota l'estructura a partir de l'adreça del primer membre:
 
 ```
-IO_CONTEXT *ioContext = reinterpret_cast<IO_CONTEXT*>(pOverlapped);
+IO_CONTEXT *lpIOContext = reinterpret_cast<IO_CONTEXT*>(pOverlapped);
 ```
 
 ## 16.3. Clau de compleció rebuda
@@ -349,5 +349,203 @@ La definició de la clau de compleció és: una dada definida pel programa que q
 ## 16.4. Bytes transferits
 El següent paràmetre de la funció que m'interessa comprovar és *bytesTransferred*. El manual de referència diu que és el nombre de bytes transferits en una operació d'IO finalitzada correctament. Però l'operació que he llençat per rebre aquesta compleció és la de *AcceptEx* i aquí entra en joc el valor que he indicat al fer la crida a *AcceptEx* per indicar el nombre de bytes que permeto llegir de la primera tramesa del client. Com que a la meva crida he indicat que no espero rebre cap byte doncs ara aquest *bytesTransferred* no l'hauré de tenir en compte.
 
-## 17. Tractament dels retorn de GetQueuedCompletionStatus amb error
+## 17. Aturada per avaluar el model lògic i propietat dels recursos
+En el model actual primer creo l'*acceptSocket* que tinc declarat al *main*, l'associo al port de compleció i després l'assigno al *acceptSocket* del IO_CONTEXT; a nivell lògic puc considerar que IO_CONTEXT de l'operació d'acceptació és el responsable de *acceptSocket*, i per tant quan aquesta operació falla puc tancar el socket i alliberar els recursos de IO_CONTEXT. Per a que l'identificació del flux de dades en la lectura del codi sigui mes senzilla faré ara una petita modificació per a que el codi coincideixi amb el model lògic: enlloc d'inicialitzar la instància del socket que tinc al main per després associar-lo al port de compleció primer reservaré memòria per al IO_CONTEXT, iniciaré el seu *acceptSocket* i després l'associaré al port de compleció. Per tant faig una refactorització al main per a que el model lógic coincideixi amb el codi: 
+
+```
+//instanciar IO_CONTEXT
+lpIOContext = new IO_CONTEXT();
+lpIOContext->operation = IO_OPERATION::ACCEPT;
+lpIOContext->acceptSocket = WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, nullptr, 0, WSA_FLAG_OVERLAPPED);
+if(lpIOContext->acceptSocket == INVALID_SOCKET) {
+	cout << "Error en crear accept socket" << endl;
+	closesocket(serverContext.listeningSocket);
+	WSACleanup();
+	return 1;
+}
+
+//associar acceptSocket a iocp
+if(CreateIoCompletionPort(reinterpret_cast<HANDLE>(lpIOContext->acceptSocket), serverContext.hCompletionPort, 0, 0) == nullptr) {
+	cout << "Error associant acceptSocket a IOCP" << endl;
+	closesocket(lpIOContext->acceptSocket);
+	closesocket(serverContext.listeningSocket);
+	CloseHandle(serverContext.hCompletionPort);
+	delete lpIOContext;
+	WSACleanup();
+	return 1;
+}
+
+//cridar a AcceptEx
+result = serverContext.lpfnAcceptEx(serverContext.listeningSocket, lpIOContext->acceptSocket, lpIOContext->acceptBuffer, 0, ADDRESS_BUFFER_SIZE, ADDRESS_BUFFER_SIZE, &bytesReceived, &lpIOContext->overlapped);
+if(result) {
+	cout << "AcceptEx completat immediatament" << endl;
+}
+else {
+	DWORD error = WSAGetLastError();
+	if(error == ERROR_IO_PENDING) {
+		cout << "AcceptEx pendent..." << endl;
+	}
+	else {
+		cout << "Error en AcceptEx: " << error << endl;
+	}
+}
+```
+He tret l'*acceptSocket* auxiliar del main i he utilitzat directament el de l'estructura IO_CONTEXT per fer l'operació d'ACCEPT. Ara si que es pot seguir clarament el flux de dades i identificar el propietari de acceptSocket i del context d'acceptació.
+
+No canvio encara el fet que el servidor només fa una única acceptació de connexió entrant. Per avaluar el model IOCP en tinc suficient amb una acceptació, més endavant ja implementaré la capacitat de gestió de múltiples clients.
+
+També modificaré el procediment del worker, ja que tal com el tinc ara només sobreviu a un retorn de la funció *GetQueuedCompletionStatus()*; com que he creat tants workers com nuclis té el sistema puc preveure que en un sistema amb un sol nucli el servidor només podrà gestionar la compleció d'una única operació; com que la primera operació és la d'acceptació d'una connexió entrant vol dir que un servidor corrent en una màquina amb un sol nucli només veurà la compleció de l'operació d'acceptació encara que es llencin la següent operació de lectura de petició del client. Per corregir-ho poso un blucle *while()* que inclourà la crida a *GetQueuedCompletionStatus()*. Això també implica que hagi d'introduir un mecanisme per a que des del main pugui controlar el bucle infinit dels workers. Aquesta solució ja està valorada al model IOCP perquè incorpora la funció **PostQueuedCompletionStatus()** per poder enviar una compleció sense cap funció associada identificable amb una clau de compleció pròpia. Per tant declaro una clau de compleció específica per finalitzar els workers que anomeno **COMPLETION_KEY_SHUTDOWN**; per ara encara no poso la gestió de l'aturada des del main, però si que implemento la recepció dins del worker:
+
+```
+//clau de compleció pròpia per finalitzar el servei
+constexpr ULONG_PTR COMPLETION_KEY_SHUTDOWN = 1000;
+
+//estructura del worker
+DWORD WINAPI WorkerThread(LPVOID lpParam) {
+	SERVER_CONTEXT *lpServerContext = static_cast<SERVER_CONTEXT*>(lpParam);
+	IO_CONTEXT *lpIOContext;
+	BOOL result;
+
+	//mentres el serevidor estigui corrent
+	while(lpServerContext->running) {
+		DWORD bytesTransferred;
+		ULONG_PTR completionKey;
+		OVERLAPPED *pOverlapped;
+
+		//espera indefinidament que arribi la notificació d'una compleció
+		if(!(result = GetQueuedCompletionStatus(lpServerContext->hCompletionPort, &bytesTransferred, &completionKey, &pOverlapped, INFINITE))) {
+			DWORD error = GetLastError();
+			if(pOverlapped == nullptr) {
+				//error intern en la pròpia GetQueuedCompletionStatus
+				cout << "Error en GetQueuedCompletionStatus: " << error << endl;
+			}
+			else {
+				//error en l'operació associada, puc recuperar context io
+				lpIOContext = reinterpret_cast<IO_CONTEXT*>(pOverlapped);
+				cout << "Error en operacio I/O: " << error << endl;
+
+				//gestió segons cada cas d'operació
+				switch(lpIOContext->operation) {
+					case IO_OPERATION::ACCEPT: {
+				
+					} break;
+					case IO_OPERATION::READ: {
+
+					} break;
+					case IO_OPERATION::WRITE: {
+
+					} break;
+				}
+			}
+		}
+		else if (completionKey == COMPLETION_KEY_SHUTDOWN && pOverlapped == nullptr) {
+			//ordre d'aturada des del main
+			break;
+		}
+		else {
+			//operació associada finalitzada correctament
+			if (pOverlapped == nullptr) {
+				//error en recuperar puonter a OVERLAPPED
+			}
+			else {
+				//operació finalitzada correctament
+				lpIOContext = reinterpret_cast<IO_CONTEXT*>(pOverlapped);
+
+				//gestió segons cada cas d'operació
+				switch(lpIOContext->operation) {
+					case IO_OPERATION::ACCEPT: {
+
+					} break;
+					case IO_OPERATION::READ: {
+
+					} break;
+					case IO_OPERATION::WRITE: {
+
+					} break;
+				}
+			}
+		}
+	}
+
+	return 0;
+}
+```
+
+
+## 17. Tractament del retorn de GetQueuedCompletionStatus FALSE i punter a OVERLAPPED no nul per l'operació ACCEPT
+Tal com he començat a avaluar anteriorment al punt **16.1** el model del procediment encara no és la versió definitiva. Per ara el worker (el procediment) processa el retorn de *GetQueuedCompletionStatus()* i finalitza, és a dir ja no queda disponible per gestionar properes notificacions; com que encara és un model per entendre exactament com funciona cada part del procés IOCP aquest comportament no m'afecta. Ara em cal determinar la resposta del procediment davant dels possibles escenaris de resposta, i en aquest punt avaluaré el cas de retorn FALSE i punter a OVERLAPPED no nul.
+
+És el cas d'un error en l'operació associada. Com que el punter a OVERLAPPED no és nul puc recuperar IO_CONTEXT i amb ell l'operació. Depenent de l'operació associada que ha fallat caldrà implementar una solució o una altra; per ara se que podré fer les operacions declarades a l'arxiu d'estructures *ACCEPT*, *READ* i *WRITE*, i per tant hauré d'implementar una línia de solució per cada cas. El mes important és que aquest error no es pot simplement ignorar ja que té recursos en memòria associats a aquesta operació. Aquesta gestió l'he d'avaluar amb cura, ja que no puc eliminar cap recurs al que el sistema hagi de tenir accés; per exemple no puc fer *delete* del IO_CONTEXT (l'havia creat amb *new*) mentre el sistema hi pugui estar treballant. Aquí també he de recordar que el model de *new / delete* de contextes és una primera aproximació al model de servidor d'alt rendiment i en una millora posterior ho canviaré per un pool de contexts reutilitzables.
+
+Error en l'operació **ACCEPT**. L'error s'ha produït en executar la crida al punter a *AcceptEx()*, i per tant el socket utilitzat (el acceptSocket) no em servirà per representar una connexió acceptada (pel simple fet que no s'ha pogut acceptar). En aquest cas en que només faig una operació d'acceptació la solució passa per tancar el socket d'acceptació i eliminar el recurs del IO_CONTEXT. Quan implementi el model amb capacitat per acceptar múltiples connexions entrants aquest punt canviarà poc, però quan implementi la millora de pool de IO_CONTEXT reutilitzables aquest punt s'haurà de modificar ja que el IO_CONTEXT no serà responsable de la seva pròpia alliberació, sinó que passarà a ser el pool de contexts. Per tant en la situació actual puc tancar el socket i alliberar els recursos de IO_CONTEXT:
+
+```
+//error en l'operació associada, puc recuperar context io
+lpIOContext = reinterpret_cast<IO_CONTEXT*>(pOverlapped);
+cout << "Error en operacio I/O: " << error << endl;
+
+//gestió segons cada cas d'operació
+switch(lpIOContext->operation) {
+	case IO_OPERATION::ACCEPT: {
+		closesocket(lpIOContext->acceptSocket);
+		delete lpIOContext;
+	} break;
+	case IO_OPERATION::READ: {
+
+	} break;
+	case IO_OPERATION::WRITE: {
+
+	} break;
+}
+```
+
+Com que encara no he implementat les crides a operacions de *READ* i *WRITE* deixo per després l'avaluació dels error relacionats a aquestes operacions.
+
+## 18. Tractament del retorn de GetQueuedCompletionStatus TRUE i punter a OVERLAPPED no nul per l'operació ACCEPT
+És el cas d'operació d'acceptació de connexió entrant amb èxit, ja puc identificar el socket client entrant i llençar l'operació de lectura inicial de la petició.
+
+Primer cal modificar el context del socket acceptat per a que *winsock* sàpiga que prové del *listeningSocket*. Amb el model de sockets tradicional la crida a *accept()* ja retorna el socket relacionat al socket d'escolta que s'hauria utilitzat. Però amb *AcceptEx()* soc jo que he de crear primer el socket que vull utilitzar per fer l'acceptació i enviar-lo com a argument junt amb el socket d'escolta, però *AcceptEx()* no fa l'associació del socket d'acceptació al socket d'escolta, sinó que s'ha de fer de forma manual:
+
+```
+setsockopt(lpIOContext->acceptSocket, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, reinterpret_cast<char*>(&lpServerContext->listeningSocket), sizeof(lpServerContext->listeningSocket));
+```
+
+Només cal tenir present que aquesta operació no crea cap socket nou, només n'actualitza el seu context.
+
+Ara ja es pot crear una nova instància de *CLIENT_CONTEXT*. En aquest punt es produeix una entelèquia que cal recordar: el socket d'acceptació passa a ser el socket client directament; no el tanco ni en creo cap de nou, sinó que és el mateix socket d'acceptació que ara agafarà el rol de socket cient. Simplement l'assigno al membre *socket* del CLIENT_CONTEXT:
+
+```
+CLIENT_CONTEXT *lpClientContext = new CLIENT_CONTEXT();
+lpClientContext->socket = lpIOContext->acceptSocket;
+```
+
+I finalment com que l'operació d'acceptació ha finalitzat ja puc alliberar els recursos de IO_CONTEXT:
+
+```
+delete lpIOContext;
+```
+
+La vista final del cas de retorn TRUE i punter a OVERLAPPED no nul per l'operació ACCEPT queda tal com:
+
+```
+case IO_OPERATION::ACCEPT: {
+	//modifica context del socket per vincular-lo al listening socket
+	iResult = setsockopt(lpIOContext->acceptSocket, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, reinterpret_cast<char*>(&lpServerContext->listeningSocket), sizeof(lpServerContext->listeningSocket));
+	if(iResult == SOCKET_ERROR) {
+		//error en modificar context
+		closesocket(lpIOContext->acceptSocket);
+		delete lpIOContext;
+	}
+	else {
+		//nova instancia de CLIENT_CONTEXT
+		CLIENT_CONTEXT *lpClientContext = new CLIENT_CONTEXT();
+		lpClientContext->socket = lpIOContext->acceptSocket;
+
+		//allibero IO_CONTEXT
+		delete lpIOContext;
+	}
+} break;
+```
+
+
 
