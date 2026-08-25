@@ -547,5 +547,78 @@ case IO_OPERATION::ACCEPT: {
 } break;
 ```
 
+## 19. Resum del procés fins l'estat actual
+Actualment ja tinc una connexió acceptada i llesta per començar a llegir-ne la petició. Però en aquest punt faré una petita pausa per sintetitzar els darrers 18 punts del procés que he dut a terme per arribar fins aquí, ja que a partir d'ara hi haurà parts concretes que es repetiran, potser no com a codi però si com a model. La idea bàsica i simplificada és: creo un socket d'escolta, creo un socket d'acceptació i llenço un procés asíncron per executar l'acceptació; la sol·licitud de connexió és rep a través del socket d'escolta i s'assigna al socket d'acceptació; quan el procés asíncron d'acceptació finalitza converteixo el socket d'acceptació a socket normal i ja queda llest per utilitzar-lo per les comunicacions amb el client.
 
+La part important és com gestionar la memòria que està involucrada en tot aquest procés. Com que es llencen les operacions de forma asíncrona necessito un "suport" (context) que em guardi les dades amb les que vull treballar, i aquest suport ha de persistir durant tot el procés. Tal com he comentat anteriorment en un servidor d'alt rendiment no es gestionaràn  contextes amb *new / delete*, sino que s'utilitzarà un pool de contextes reutilitzables. Però per al meu projecte es vàlid fer el *new / delete*.
+
+La part més important i brilant del model IOCP és com persistir i recuperar la informació entre processos. Les operacions de IOCP tenen el component **OVERLAPPED** que és pot interpretar com l'adreça de memória on s'executa el procés asíncron. El sistema desconeix el meu model d'estructura *IO_CONTEXT* però si que coneix l'*OVERLAPPED*, i, de fet, és el que envia junt amb la notificació d'un procés asíncron completat (una compleció). Aquí aprofito la característica de **C / C++** segons la qual les estructures es guarden en memòria de forma seqüencial a com es declaren al codi i, a més, l'adreça de memòria del primer component d'un objecte en memòria coincideix amb l'adreça de memòria del mateix objecte. Per aquest motiu quan un cop feta la compleció del procés el sistema em retorna l'*OVERLAPPED* de l'operació, puc recuperar tota la memòria de l'estructura *IO_CONTEXT* coneixent la seva grandària a partir de l'adressa de memòria de l'*OVERLAPPED* ja que els dos objectes comencen a la mateixa adreça de memòria:
+
+```
+OVERLAPPED = adressa de memòria OVERLAPPED + grandaria OVERLAPPED
+IO_CONTEXT = adressa de memòria OVERLAPPED + grandària IO_CONTEXT
+```
+
+Aquest mateix concepte s'anirà aplicant per cada operació asíncrona que es vulgui executar; per exemple el codi implementat fins ara ha fet l'acceptació d'un client, el següent pas és llegir la seva petició; per tant crearé un nou context IO_CONTEXT per l'operació de lectura, llençaré el procés asíncron de l'operació de lectura i passarà el mateix que abans: el sistema despertarà un worker amb la notificació de la compleció i amb l'*OVERLAPPED* de l'operació des del qual podré recuperar les dades corresponents. I el mateix concepte s'aplicarà a l'operació d'escriptura. Això vol dir que cada operació asíncrona que es llenci necessita el seu propi context, i en el meu model el context d'operació genèrica és el *IO_CONTEXT*.
+
+## 20. Preparar operació de lectura
+Al igual que l'operació d'acceptació que he fet anteriorment, l'operació de lectura requereix un *OVERLAPPED* que jo li proporciono des del *IO_CONTEXT*. Per tant el primer que faig és reservar memòria per un IO_CONTEXT diferent al que he utilitzat per fer l'acceptació:
+
+```
+IO_CONTEXT *lpReadContext = new IO_CONTEXT();
+lpReadContext->operation = IO_OPERATION::READ;
+```
+
+La declaració és igual (conceptualment) a la que he fet anteriorment abans de llençar el procés d'acceptació. Però ara disposo d'un nou component: la connexió amb el client. Per separar una mica els conceptes he declarat les dades del client a l'estructura *CLIENT_CONTEXT*, de manera que el socket client el puc posar al *CLIENT_CONTEXT* i aquest el puc posar dins de *IO_CONTEXT*, amb això quan finalitzi l'operació de lectura podré recuperar (igual que he fet abans) el *IO_CONTEXT* a partir de l'adreça de memòria del *OVERLAPPED*, i se que dins del *IO_CONTEXT* hi tindré el *CLIENT_CONTEXT*. Amb això podré persistir el IO_CONTEXT al llarg de l'operació de lectura, i en finalitzar-lo podré perpetuar el *CLIENT_CONTEXT* fins que finalitzi tota la gestió del client. Per tant:
+
+```
+IO_CONTEXT *lpReadContext = new IO_CONTEXT();
+lpReadContext->operation = IO_OPERATION::READ;
+lpReadContext->clientContext = lpClientContext;
+```
+
+Per fer l'operació de lectura necessito un **WSABUF**: és una estructura que indica on guardar les dades llegides i quants bytes hi caben:
+
+```
+struct WSABUF {
+    ULONG len;
+    CHAR *buf;
+};
+```
+
+Això vol dir que necessitarè un nou buffer a l'estructura IO_CONTEXT; ara hi tinc el buffer per guardar les dades de l'acceptació però en creo un altre per guardar les dades de lectura:
+
+```
+constexpr DWORD READ_BUFFER_SIZE = 4096;
+
+struct IO_CONTEXT {
+	OVERLAPPED overlapped{};
+	WSABUF buffer{};
+	IO_OPERATION operation;
+	CLIENT_CONTEXT *clientContext = nullptr;
+	SOCKET acceptSocket = INVALID_SOCKET;
+	char acceptBuffer[ACCEPT_BUFFER_SIZE]{};
+	char readBuffer[READ_BUFFER_SIZE]{};
+};
+```
+
+Per tant també assigno el WSABUFF al context de l'operació de lectura:
+
+```
+IO_CONTEXT *lpReadContext = new IO_CONTEXT();
+lpReadContext->operation = IO_OPERATION::READ;
+lpReadContext->clientContext = lpClientContext;
+lpReadContext->buffer.buf = lpReadContext->readBuffer;
+lpReadContext->buffer.len = READ_BUFFER_SIZE;
+```
+
+I ara ja puc llençar el procés asíncron de lectura:
+
+```
+DWORD flags = 0;
+DWORD bytesReceived = 0;
+int result;
+
+result = WSARecv(lpClientContext->socket, &lpReadContext->buffer, 1, &bytesReceived, &flags, &lpReadContext->overlapped, nullptr);
+```
 
