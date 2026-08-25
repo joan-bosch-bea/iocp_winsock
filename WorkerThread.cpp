@@ -62,8 +62,13 @@ DWORD WINAPI WorkerThread(LPVOID lpParam) {
 					CLIENT_CONTEXT *lpClientContext = new CLIENT_CONTEXT();
 					lpClientContext->socket = lpIOContext->acceptSocket;
 
-					//allibero IO_CONTEXT
+					//allibero IO_CONTEXT completat
 					delete lpIOContext;
+
+					//creo nou IO_CONTEXT per operació de lectura
+					IO_CONTEXT *lpReadContext = new IO_CONTEXT();
+					lpReadContext->operation = IO_OPERATION::READ;
+					lpReadContext->clientContext = lpClientContext;
 				}
 			} break;
 			case IO_OPERATION::READ: {
