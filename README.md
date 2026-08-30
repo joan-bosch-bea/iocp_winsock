@@ -1,8 +1,8 @@
 # IOCP Winsock
-Creació des de zero d'un servidor d'alt rendiment per a sistemes Windows amb I/O Completion Ports (IOCP), en llenguatge C++.
+Creació des de zero d'un servidor HTTP d'alt rendiment per a sistemes Windows amb I/O Completion Ports (IOCP), en llenguatge C++.
 
 # Objectiu
-L'objectiu d'aquest projecte és construir el servidor documentant cada pas i explicant les diferents parts de la implementació per entendre com funciona l'arquitectura d'IOCP i com es pot utilitzar per gestionar comunicacions de xarxa de manera asíncrona i concurrent.
+L'objectiu d'aquest projecte és construir el servidor HTTP documentant cada pas i explicant les diferents parts de la implementació per entendre com funciona l'arquitectura d'IOCP i com es pot utilitzar per gestionar comunicacions de xarxa de manera asíncrona i concurrent.
 
 # Fonaments d'IOCP
 **IOCP** (Input Output Completion port) és un mecanisme propi del nucli de Windows que permet associar operacions d'I/O asíncrones amb una cua de complecions, i també permet que diversos processos accedeixin a aquesta cua per processar-les. La paraula *port* de IOCP fa referència al terme que Windows utilitza per identificar el sistema de distribució (i sincronització) de les notificacions de finalitzacions de processos asíncrons.
@@ -621,4 +621,84 @@ int result;
 
 result = WSARecv(lpClientContext->socket, &lpReadContext->buffer, 1, &bytesReceived, &flags, &lpReadContext->overlapped, nullptr);
 ```
+
+Amb això no faig una lectura, sinó simplement llenço el procés asíncron per fer una lectura quan d'un màxim de *READ_BUFFER_SIZE* bytes dins del *lpReadContext->readBuffer*. Quan hi haurà dades disponibles es farà la lectura al lloc indicat i es despertarà el worker amb la notificació d'operació *IO_OPERATION::READ* completada. Igual que faig a cada compleció, primer recupero les dades del context i després en descarto l'estructura de suport per crear-ne una de nova i persistir les dades d'un mateix client al llarg de tot el servei.
+
+## 21. Avaluar operació de lectura
+Quan el *GetQueuedCompletionStatus* desperti al worker amb la notificació d'operació *IO_OPERATION::READ* completada ja tindré accés a les dades rebudes. Com que no es pot assegurar que el client hagi enviat totes les dades en una sola tramesa ni que el socket jagi pogut llegir totes les dades en una vegada, caldrà guardar les dades rebudes en un buffer incremental: simplemenetanar afegint les dades que arriben a un buffer per processar-le. Com que el projecte està encarat a implementar un servidor HTTP la primera condició ja la puc establir ara: sabré que la seqüencia de finalització de la petició per part del client serà "\r\n\r\n", per tant quan recuperi les dades rebudes les afegiré al buffer de la petició del client i després hi buscaré la seqüència de finalització. Mentre no trobi la seqüència de finalització hauré de tornar a llençar una operació asíncrona de *WSARecv()*, esperar la compleció i afegir les dades rebues al buffer de la petició del client.
+
+El procés d'avaluació del resultat de la compleció és el mateix en tots els casos. En cas d'èxit recupero el context de l'operació i em centro en el cas de l'operació *IO_OPERATION::READ* que és la que he llençat al punt anterior. Faig aquí una pausa per remarcar-me que el fet de llençar una operació *WSARecv()* no implica que rebi una notificació *IO_OPERATION::READ*, sinó que jo configuro manualment el context de l'operació amb l'identificador de l'operació i llenço l'operació amb l'OVERLAPPED del context que he (creat i) configurat.
+
+Per tant em situo ara al cas de compleció amb èxit de l'operació *IO_OPERATION::READ*. En l'operació de lectura he de comprovar que el client no hagi fet un *graceful shutdown*, consistent simplement en comprovar que la compleció de l'operació de lectura no s'hagin transmès 0 bytes. Si s'han llegit mes de 0 bytes aquests els afegeixo al buffer de la petició del client i faig la cerca de la seqüència de finalització de la capçalera HTTP. És important tenir en compte que aquest projecte està en fase de construcció, per tant només ara em centro en avaluar únicament una sola petició (la primera que arribi del client); en una millora posterior implementaré una llista de peticions dins del context del client.
+
+```
+case IO_OPERATION::READ: {
+	//recupero client context
+	CLIENT_CONTEXT *lpClientContext = lpIOContext->clientContext;
+
+	//detecto graceful shutdown
+	if(bytesTransferred == 0) {
+		cout << "El client ha tancat la connexio" << endl;
+		closesocket(lpClientContext->socket);
+		delete lpIOContext;
+		delete lpClientContext;
+	}
+
+	//acumulo la petició
+	string data(lpIOContext->readBuffer, bytesTransferred);
+	lpClientContext->request.append(data);
+
+	cout << "Complecio READ" << endl;
+	cout << "Bytes rebuts: " << bytesTransferred << endl;
+	cout << "Dades rebudes <" << data << ">" << endl;
+
+	//busco final de http al request del cient
+	if(lpClientContext->request.find("\r\n\r\n") != std::string::npos) {
+		//llenço WSASend
+	}
+	else {
+		//llenço nova WSARead
+	}
+} break;
+```
+
+El procés de llençar una nova operació de lectura serà similar al que el que he fet durant l'avaluació de la compleció del procés d'acceptació: el socket client seguirà sent el mateix i el context del client s'haurà de propagar (per no perdre la part o parts anteriorment llegides de la petició). Per aquest motiu seria interessant en aquest punt fer una refactorització del codi que consistirà en extreure les parts de codi que llencen una operació. Per ara només extrec el codi que llença l'operació asíncrona de lectura:
+
+```
+int LaunchReadOperation(SOCKET clientSocket) {
+	IO_CONTEXT *lpReadContext = nullptr;
+	DWORD flags = 0;
+	DWORD bytesReceived = 0;
+	int result = 0;
+	int wsaError = 0;
+
+	//nova instancia de CLIENT_CONTEXT
+	CLIENT_CONTEXT *lpClientContext = new CLIENT_CONTEXT();
+	lpClientContext->socket = clientSocket;
+
+	//crear nou IO_CONTEXT per operació de lectura
+	lpReadContext = new IO_CONTEXT();
+	lpReadContext->operation = IO_OPERATION::READ;
+	lpReadContext->clientContext = lpClientContext;
+	lpReadContext->buffer.buf = lpReadContext->readBuffer;
+	lpReadContext->buffer.len = READ_BUFFER_SIZE;
+
+	//llençar el procés de lectura
+	if((result = WSARecv(lpClientContext->socket, &lpReadContext->buffer, 1, &bytesReceived, &flags, &lpReadContext->overlapped, nullptr)) == SOCKET_ERROR) {
+		if((wsaError = WSAGetLastError()) != WSA_IO_PENDING) {
+			delete lpClientContext;
+			delete lpReadContext;
+			lpReadContext = nullptr;
+		}
+		return wsaError;
+	}
+	else {
+		return result;
+	}
+}
+```
+
+Per ara no necessitaré cap referència als contexts creats (ni el de l'operació ni el de lectura), per això la funció de llançament de l'operació gestiona la memòria en cas d'error, excepte el socket client.
+
+
 
