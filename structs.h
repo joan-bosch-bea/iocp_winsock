@@ -1,6 +1,8 @@
 #ifndef _HSTRUCTSH
 #define _HSTRUCTSH
 
+#include <string>
+
 enum class IO_OPERATION {
 	ACCEPT,
 	READ,
@@ -23,6 +25,7 @@ struct SERVER_CONTEXT {
 
 struct CLIENT_CONTEXT {
 	SOCKET socket = INVALID_SOCKET;
+	std::string request;
 };
 
 struct IO_CONTEXT {

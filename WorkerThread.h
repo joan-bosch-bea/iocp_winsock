@@ -13,5 +13,6 @@
 using namespace std;
 
 DWORD WINAPI WorkerThread(LPVOID lpParam);
+int LaunchReadOperation(SOCKET);
 
 #endif

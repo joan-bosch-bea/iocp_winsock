@@ -11,8 +11,6 @@
 #include "WorkerThread.h"
 using namespace std;
 
-
-
 int main() {
 	WSADATA wsaData;
 	sockaddr_in serverAddress{};
@@ -74,6 +72,16 @@ int main() {
 		WSACleanup();
 		return 1;
 	}
+
+	//associar socketc d'escola a IOCP
+	if (CreateIoCompletionPort(reinterpret_cast<HANDLE>(serverContext.listeningSocket), serverContext.hCompletionPort, 0, 0) == nullptr) {
+		cout << "Error associant listeningSocket a IOCP: " << GetLastError() << endl;
+		closesocket(serverContext.listeningSocket);
+		CloseHandle(serverContext.hCompletionPort);
+		WSACleanup();
+		return 1;
+	}
+
 	serverContext.running = true;
 
 	//crear els fils de procés
@@ -112,6 +120,8 @@ int main() {
 		return 1;
 	}
 
+	cout << "Servidor escoltant en 8080" << endl;
+
 	//cridar a AcceptEx
 	result = serverContext.lpfnAcceptEx(serverContext.listeningSocket, lpIOContext->acceptSocket, lpIOContext->acceptBuffer, 0, ADDRESS_BUFFER_SIZE, ADDRESS_BUFFER_SIZE, &bytesReceived, &lpIOContext->overlapped);
 	if(result) {
@@ -126,4 +136,6 @@ int main() {
 			cout << "Error en AcceptEx: " << error << endl;
 		}
 	}
+
+	while(1) {}
 }
