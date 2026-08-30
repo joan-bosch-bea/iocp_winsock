@@ -1,8 +1,8 @@
 # IOCP Winsock
-Creació des de zero d'un servidor d'alt rendiment per a sistemes Windows amb I/O Completion Ports (IOCP), en llenguatge C++.
+Creació des de zero d'un servidor HTTP d'alt rendiment per a sistemes Windows amb I/O Completion Ports (IOCP), en llenguatge C++.
 
 # Objectiu
-L'objectiu d'aquest projecte és construir el servidor documentant cada pas i explicant les diferents parts de la implementació per entendre com funciona l'arquitectura d'IOCP i com es pot utilitzar per gestionar comunicacions de xarxa de manera asíncrona i concurrent.
+L'objectiu d'aquest projecte és construir el servidor HTTP documentant cada pas i explicant les diferents parts de la implementació per entendre com funciona l'arquitectura d'IOCP i com es pot utilitzar per gestionar comunicacions de xarxa de manera asíncrona i concurrent.
 
 # Fonaments d'IOCP
 **IOCP** (Input Output Completion port) és un mecanisme propi del nucli de Windows que permet associar operacions d'I/O asíncrones amb una cua de complecions, i també permet que diversos processos accedeixin a aquesta cua per processar-les. La paraula *port* de IOCP fa referència al terme que Windows utilitza per identificar el sistema de distribució (i sincronització) de les notificacions de finalitzacions de processos asíncrons.
@@ -620,5 +620,34 @@ DWORD bytesReceived = 0;
 int result;
 
 result = WSARecv(lpClientContext->socket, &lpReadContext->buffer, 1, &bytesReceived, &flags, &lpReadContext->overlapped, nullptr);
+```
+
+Amb això no faig una lectura, sinó simplement llenço el procés asíncron per fer una lectura quan d'un màxim de *READ_BUFFER_SIZE* bytes dins del *lpReadContext->readBuffer*. Quan hi haurà dades disponibles es farà la lectura al lloc indicat i es despertarà el worker amb la notificació d'operació *IO_OPERATION::READ* completada. Igual que faig a cada compleció, primer recupero les dades del context i després en descarto l'estructura de suport per crear-ne una de nova i persistir les dades d'un mateix client al llarg de tot el servei.
+
+## 21. Avaluar operació de lectura
+Quan el *GetQueuedCompletionStatus* desperti al worker amb la notificació d'operació *IO_OPERATION::READ* completada ja tindré accés a les dades rebudes. Com que no es pot assegurar que el client hagi enviat totes les dades en una sola tramesa ni que el socket jagi pogut llegir totes les dades en una vegada, caldrà guardar les dades rebudes en un buffer incremental: simplemenetanar afegint les dades quearriben a un buffer per processar-le. Com que el projecte està encarat a implementar un servidor HTTP la primera condició ja la puc establir ara: sabré que la seqüencia de finalització de la petició per part del client serà "\r\n\r\n", per tant quan recuperi les dades rebudes les afegiré al buffer incremental i després hi buscaré la seqüència de finalització. Mentres no trobi la seqüència de finalització haurè de tornar a llençar una operació asíncrona de *WSARecv()*, esperar la compleció i afegir les dades rebues al buffer incremental.
+
+El procés d'avaluació del resultat de la compleció és el mateix en tots els casos. En cas d'èxit recupero el context de l'operació i em centro en el cas de l'operació *IO_OPERATION::READ* que és la que he llençat al punt anterior. Faig aquí una pausa per remarcar-me que el fet de llençar una operació *WSARecv()* no implica que rebi una notificació *IO_OPERATION::READ*, sinó que jo configuro manualment el context de l'operació amb l'identificador de l'operació i llenço l'operació amb l'OVERLAPPED del context que he (creat i) configurat.
+
+Per tant em situo ara al cas de compleció amb èxit de l'operació *IO_OPERATION::READ*. Recupero el *CLIENT_CONTEXT* del context de l'operació i les dades rebudes, que les guardo en un buffer temporal per després afegir-les al buffer de petició del contexte del client; un cop recuperades aquestes dades ja puc alliberar el contexte de l'operació:
+
+```
+CLIENT_CONTEXT *lpClientContext = lpIOContext->clientContext;
+string data(lpIOContext->readBuffer, bytesTransferred);
+lpClientContext->request.append(data);
+delete lpIOContext;
+```
+
+En aquest punt és on busco la seqüència de finalització de la capçalera HTTP al buffer incremental del request de context del client. És important tenir en compte que aquest projecte està en fase de construcció, per tant només ara em centro en avaluar únicament una sola petició (la primera que arribi del client); en una millora posterior implementaré una llista de peticions dins del context del client.
+
+Com que el projecte està en construcció la cerca de la seqüència de finalització de la capçalera HTTP serà molt simple:
+
+```
+if(lpClientContext->request.find("\r\n\r\n") != std::string::npos) {
+	//petició completada
+}
+else {
+	//petició parcial
+}
 ```
 
