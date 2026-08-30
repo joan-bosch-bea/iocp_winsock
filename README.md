@@ -698,7 +698,22 @@ int LaunchReadOperation(SOCKET clientSocket) {
 }
 ```
 
-Per ara no necessitaré cap referència als contexts creats (ni el de l'operació ni el de lectura), per això la funció de llançament de l'operació gestiona la memòria en cas d'error, excepte el socket client.
+Per ara no necessitaré cap referència als contexts creats (ni el de l'operació ni el de lectura), per això la funció de llançament de l'operació gestiona la memòria en cas d'error (excepte el socket client) i no retornarà cap referència als contexts creats.
+
+## 22. Avaluació del flux de dades abans de la primera execució
+Actualment el servidor està inacabat: no fa el tancaments del socket d'escolta ni finalitza correctament la llibreria Winsock. Tot i això ara és un bon moment per seguir els flux de dades de l'aplicació i esbrinar si m'he deixat alguna part important.
+
+El primer que veig és que durant la inicialització del port de compleció (IOCP) no he vinculat el socket d'escolta al propi port, per tant tal com estarà ara el port de compleció no detectarà mai operacions d'I/O sobre el port d'escolta. La solució és associar el socket d'escolta al port de compleció, tal com he fet amb el socket d'acceptació:
+
+```
+if (CreateIoCompletionPort(reinterpret_cast<HANDLE>(serverContext.listeningSocket), serverContext.hCompletionPort, 0, 0) == nullptr) {
+	cout << "Error associant listeningSocket a IOCP: " << GetLastError() << endl;
+	closesocket(serverContext.listeningSocket);
+	CloseHandle(serverContext.hCompletionPort);
+	WSACleanup();
+	return 1;
+}
+```
 
 
 
