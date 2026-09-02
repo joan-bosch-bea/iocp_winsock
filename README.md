@@ -674,16 +674,12 @@ case IO_OPERATION::READ: {
 El procés de llençar una nova operació de lectura serà similar al que el que he fet durant l'avaluació de la compleció del procés d'acceptació: el socket client seguirà sent el mateix i el context del client s'haurà de propagar (per no perdre la part o parts anteriorment llegides de la petició). Per aquest motiu seria interessant en aquest punt fer una refactorització del codi que consistirà en extreure les parts de codi que llencen una operació. Per ara només extrec el codi que llença l'operació asíncrona de lectura:
 
 ```
-int LaunchReadOperation(CLIENT_CONTEXT *lpPersistedClientContext) {
+int LaunchReadOperation(CLIENT_CONTEXT *lpClientContext) {
 	IO_CONTEXT *lpReadContext = nullptr;
-	CLIENT_CONTEXT *lpClientContext = nullptr;
 	DWORD flags = 0;
 	DWORD bytesReceived = 0;
 	int result = 0;
 	int wsaError = 0;
-
-	//persisteix client context
-	lpClientContext = lpPersistedClientContext;
 
 	//crear nou IO_CONTEXT per operació de lectura
 	lpReadContext = new IO_CONTEXT();
