@@ -73,7 +73,7 @@ int main() {
 		return 1;
 	}
 
-	//associar socketc d'escola a IOCP
+	//associar socket d'escolta a IOCP
 	if (CreateIoCompletionPort(reinterpret_cast<HANDLE>(serverContext.listeningSocket), serverContext.hCompletionPort, 0, 0) == nullptr) {
 		cout << "Error associant listeningSocket a IOCP: " << GetLastError() << endl;
 		closesocket(serverContext.listeningSocket);
