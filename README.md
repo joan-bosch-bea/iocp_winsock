@@ -640,24 +640,33 @@ case IO_OPERATION::READ: {
 	if(bytesTransferred == 0) {
 		cout << "El client ha tancat la connexio" << endl;
 		closesocket(lpClientContext->socket);
-		delete lpIOContext;
 		delete lpClientContext;
-	}
-
-	//acumulo la petició
-	string data(lpIOContext->readBuffer, bytesTransferred);
-	lpClientContext->request.append(data);
-
-	cout << "Complecio READ" << endl;
-	cout << "Bytes rebuts: " << bytesTransferred << endl;
-	cout << "Dades rebudes <" << data << ">" << endl;
-
-	//busco final de http al request del cient
-	if(lpClientContext->request.find("\r\n\r\n") != std::string::npos) {
-		//llenço WSASend
+		delete lpIOContext;
 	}
 	else {
-		//llenço nova WSARead
+		//acumulo la petició
+		string data(lpIOContext->readBuffer, bytesTransferred);
+		lpClientContext->request.append(data);
+
+		cout << "Complecio READ" << endl;
+		cout << "Bytes rebuts: " << bytesTransferred << endl;
+		cout << "Dades rebudes <" << data << ">" << endl;
+
+		//busco final de http al request del cient
+		if(lpClientContext->request.find("\r\n\r\n") != std::string::npos) {
+			cout << "Peticio HTTP completada" << endl;
+		}
+		else {
+			//llenço nova WSARead
+			int result = LaunchReadOperation(lpClientContext);
+			if(result != 0 && result != WSA_IO_PENDING) {
+				cout << "Error en operacio WSARecv: " << result << endl;
+				closesocket(lpClientContext->socket);
+				delete lpClientContext;
+			}
+		}
+		//allibero IO_CONTEXT completat
+		delete lpIOContext;
 	}
 } break;
 ```
@@ -665,16 +674,16 @@ case IO_OPERATION::READ: {
 El procés de llençar una nova operació de lectura serà similar al que el que he fet durant l'avaluació de la compleció del procés d'acceptació: el socket client seguirà sent el mateix i el context del client s'haurà de propagar (per no perdre la part o parts anteriorment llegides de la petició). Per aquest motiu seria interessant en aquest punt fer una refactorització del codi que consistirà en extreure les parts de codi que llencen una operació. Per ara només extrec el codi que llença l'operació asíncrona de lectura:
 
 ```
-int LaunchReadOperation(SOCKET clientSocket) {
+int LaunchReadOperation(CLIENT_CONTEXT *lpPersistedClientContext) {
 	IO_CONTEXT *lpReadContext = nullptr;
+	CLIENT_CONTEXT *lpClientContext = nullptr;
 	DWORD flags = 0;
 	DWORD bytesReceived = 0;
 	int result = 0;
 	int wsaError = 0;
 
-	//nova instancia de CLIENT_CONTEXT
-	CLIENT_CONTEXT *lpClientContext = new CLIENT_CONTEXT();
-	lpClientContext->socket = clientSocket;
+	//persisteix client context
+	lpClientContext = lpPersistedClientContext;
 
 	//crear nou IO_CONTEXT per operació de lectura
 	lpReadContext = new IO_CONTEXT();
@@ -686,7 +695,6 @@ int LaunchReadOperation(SOCKET clientSocket) {
 	//llençar el procés de lectura
 	if((result = WSARecv(lpClientContext->socket, &lpReadContext->buffer, 1, &bytesReceived, &flags, &lpReadContext->overlapped, nullptr)) == SOCKET_ERROR) {
 		if((wsaError = WSAGetLastError()) != WSA_IO_PENDING) {
-			delete lpClientContext;
 			delete lpReadContext;
 			lpReadContext = nullptr;
 		}
@@ -698,7 +706,17 @@ int LaunchReadOperation(SOCKET clientSocket) {
 }
 ```
 
-Per ara no necessitaré cap referència als contexts creats (ni el de l'operació ni el de lectura), per això la funció de llançament de l'operació gestiona la memòria en cas d'error (excepte el socket client) i no retornarà cap referència als contexts creats.
+Aquesta funció espera rebre un CLIENT_CONTEXT vàlid, ja sigui nou o persistit d'operacions anteriors. En cas d'error aquesta funció gestionarà els elements en memòria que ha creat ella mateixa però no els altres. Per tant les crides a aquesta funció seran:
+
+```
+//després de la compleció d'acceptació
+CLIENT_CONTEXT *lpClientContext = new CLIENT_CONTEXT();
+lpClientContext->socket = lpIOContext->acceptSocket;
+LaunchReadOperation(lpClientContext);
+
+//després d'una compleció de lectura
+LaunchReadOperation(lpClientContext);
+```
 
 ## 22. Avaluació del flux de dades abans de la primera execució
 Actualment el servidor està inacabat: no fa el tancaments del socket d'escolta ni finalitza correctament la llibreria Winsock. Tot i això ara és un bon moment per seguir els flux de dades de l'aplicació i esbrinar si m'he deixat alguna part important.
