@@ -692,7 +692,6 @@ int LaunchReadOperation(CLIENT_CONTEXT *lpClientContext) {
 	if((result = WSARecv(lpClientContext->socket, &lpReadContext->buffer, 1, &bytesReceived, &flags, &lpReadContext->overlapped, nullptr)) == SOCKET_ERROR) {
 		if((wsaError = WSAGetLastError()) != WSA_IO_PENDING) {
 			delete lpReadContext;
-			lpReadContext = nullptr;
 		}
 		return wsaError;
 	}
@@ -728,6 +727,311 @@ if (CreateIoCompletionPort(reinterpret_cast<HANDLE>(serverContext.listeningSocke
 	return 1;
 }
 ```
+Un cop corregit aquest puc fer una primera execució (encara que estigui mal finalitzat) només per comprovar que les operacions d'acceptació i lectura funcionen correctament.
 
+## 23. Llençar operació d'escriptura
+Un cop resolt per la via senzilla i directa el cas de capçalera http completament rebuda:
 
+```
+if(lpClientContext->request.find("\r\n\r\n") != std::string::npos) {
+	cout << "Peticio HTTP completada" << endl;
+}
+```
+ja puc llençar l'operació d'escriptura asíncrona. La diferència principal entre les operacions de lectura i escriptura (a part de la pròpia operació) és que per la lectura no es pot saber el contingut que es rebrà (per extensió tampoc la seva llargària) i en canvi per l'operació d'escriptura si (i també per extensió la seva llargària). Amb això puc controlar el procés d'escriptura contrastant els bytes a anviar amb els bytes enviats.
+
+Creo el mètode que llença l'operació asíncrona d'escriptura:
+´´´
+int LaunchWriteOperation(CLIENT_CONTEXT *lpClientContext) {
+	IO_CONTEXT *lpWriteContext = nullptr;
+
+	//nou io context
+	lpWriteContext = new IO_CONTEXT();
+	lpWriteContext->operation = IO_OPERATION::WRITE;
+	lpWriteContext->clientContext = lpClientContext;
+	lpWriteContext->bytesSent = 0;
+
+	//dades a enviar
+	lpWriteContext->buffer.buf = lpClientContext->response.data();
+	lpWriteContext->buffer.len = static_cast<ULONG>(lpClientContext->response.size());
+
+	//executar WSASend
+}
+```
+
+En aquesta funció i concretament en la instrucció *lpWriteContext->buffer.buf = lpClientContext->response.data();* hi ha una característica oculta que la fa una mica complexa. El *lpWriteContext->buffer.buf* és un *WSABUF*, i es defineix de la següent manera:
+
+```
+typedef struct _WSABUF {
+    u_long len;
+    char FAR *buf;
+} WSABUF;
+```
+
+Això vol dir que *lpWriteContext->buffer.buf* internament és un _char *_. La caracteristica oculta està en que en les versions de C++ anteriors a 17 el *std::string.data()* retorna _const char *_, per tant el compilador no deixa fer aquesta assignació. La part positiva és que a partir de la versió de C++ 17 *std::string.data()* retorna _char*_, per tant ja és compatible amb l'assignació. Per tant l'assignació *lpWriteContext->buffer.buf = lpClientContext->response.data();* només funciona en C++ 17 i posteriors.
+
+Ara he de modelar com envio la resposta. No és pràctic anar creant parts de resposta en base als que s'han enviat anteriorment; el model per enviar la resposta és igual al que utilitzaria en un socket normal: si el total és x bytes, n'envio y i me'n queden per enviar x - y, per tant avanço el punter d'inici de lectura a sobre del buffer de resposta per intentar enviar només els que falten. Per tant necessito un comptador al CLIENT_CONTEXT que m'indiqui quants bytes he enviat en total; els bytes de la resposta ja els se (son la longitud de la resposta), i els bytes enviats en cada compleció de l'operació d'escriptura també els se ja que son els que em retorna *GetQueuedCompletionStatus()* al paràmetre *bytesTransferred*. Amb aquest plantejament ja puc crear la funció que llença l'operació asíncrona d'escriptura:
+
+```
+int LaunchWriteOperation(CLIENT_CONTEXT *lpClientContext) {
+	IO_CONTEXT *lpWriteContext = nullptr;
+	DWORD bytesSent = 0;
+	int result;
+	int wsaError = 0;
+
+	lpWriteContext = new IO_CONTEXT();
+	lpWriteContext->operation = IO_OPERATION::WRITE;
+	lpWriteContext->clientContext = lpClientContext;
+	lpWriteContext->buffer.buf = lpClientContext->response.data() + lpClientContext->bytesSent;
+	lpWriteContext->buffer.len = static_cast<ULONG>(lpClientContext->response.size() - lpClientContext->bytesSent);
+
+	if((result = WSASend(lpClientContext->socket, &lpWriteContext->buffer, 1, &bytesSent, 0, &lpWriteContext->overlapped, nullptr)) == SOCKET_ERROR) {
+		if((wsaError = WSAGetLastError()) != WSA_IO_PENDING) {
+			delete lpWriteContext;
+		}
+		return wsaError;
+	}
+	else {
+		return result;
+	}
+}
+```
+
+Tal com es pot veure és molt similar a la funció que llença l'operació asíncrona de lectura, enlloc de proposar el buffer de lectura i el seu tamany proposo el buffer d'escriptura i el seu tamany. Això no vol dir que l'operació d'escriptura envii tots els bytes proposats, sinó que enviarà els que podrà i en notificarà la quantitat a través de *GetQueuedCompletionStatus()*.
+
+Ara el WorkerThread ja processa les tres complecions (acceptació, lectura i escriptura), i queda de la següent forma:
+
+```
+DWORD WINAPI WorkerThread(LPVOID lpParam) {
+	SERVER_CONTEXT *lpServerContext = static_cast<SERVER_CONTEXT*>(lpParam);
+	IO_CONTEXT *lpIOContext;
+	BOOL bResult;
+	int iResult;
+	int wsaError;
+
+	//mentres el serevidor estigui corrent
+	while(lpServerContext->running) {
+		DWORD bytesTransferred;
+		ULONG_PTR completionKey;
+		OVERLAPPED *pOverlapped;
+
+		//espera indefinidament que arribi la notificació d'una compleció
+		if(!(bResult = GetQueuedCompletionStatus(lpServerContext->hCompletionPort, &bytesTransferred, &completionKey, &pOverlapped, INFINITE))) {
+			DWORD error = GetLastError();
+			if(pOverlapped == nullptr) {
+				//error intern en la pròpia GetQueuedCompletionStatus
+				cout << "Error en GetQueuedCompletionStatus: " << error << endl;
+			}
+			else {
+				//error en l'operació associada, puc recuperar context io
+				lpIOContext = reinterpret_cast<IO_CONTEXT*>(pOverlapped);
+				cout << "Error en operacio I/O: " << error << endl;
+
+				//gestió segons cada cas d'operació
+				switch(lpIOContext->operation) {
+					case IO_OPERATION::ACCEPT: {
+						closesocket(lpIOContext->acceptSocket);
+						delete lpIOContext;
+					} break;
+					case IO_OPERATION::READ: {
+						cout << "Error en READ: " << error << endl;
+
+						//recupero client context, tanco socket i allibero recursos
+						CLIENT_CONTEXT* lpClientContext = lpIOContext->clientContext;
+						closesocket(lpClientContext->socket);
+						delete lpClientContext;
+						delete lpIOContext;
+					} break;
+					case IO_OPERATION::WRITE: {
+						cout << "Error en WRITE: " << error << endl;
+
+						//recupero client context, tanco socket i allibero recursos
+						CLIENT_CONTEXT* lpClientContext = lpIOContext->clientContext;
+						closesocket(lpClientContext->socket);
+						delete lpClientContext;
+						delete lpIOContext;
+					} break;
+				}
+			}
+		}
+		else if (completionKey == COMPLETION_KEY_SHUTDOWN && pOverlapped == nullptr) {
+			//ordre d'aturada des del main
+			break;
+		}
+		else {
+			//operació finalitzada correctament
+			lpIOContext = reinterpret_cast<IO_CONTEXT*>(pOverlapped);
+
+			//gestió segons cada cas d'operació
+			switch(lpIOContext->operation) {
+				case IO_OPERATION::ACCEPT: {
+					//modificar context del socket per vincular-lo al listening socket
+					iResult = setsockopt(lpIOContext->acceptSocket, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, reinterpret_cast<char*>(&lpServerContext->listeningSocket), sizeof(lpServerContext->listeningSocket));
+					if(iResult == SOCKET_ERROR) {
+						//error en modificar context
+						cout << "Error en vincular accept socket a listening socket" << endl;
+						closesocket(lpIOContext->acceptSocket);
+						delete lpIOContext;
+					}
+					else {
+						//crea context client
+						CLIENT_CONTEXT *lpClientContext = new CLIENT_CONTEXT();
+						lpClientContext->socket = lpIOContext->acceptSocket;
+
+						//llençar procès de lectura
+						int result = LaunchReadOperation(lpClientContext);
+						if(result != 0 && result != WSA_IO_PENDING) {
+							cout << "Error en operacio WSARecv: " << result << endl;
+							delete lpClientContext;
+							closesocket(lpIOContext->acceptSocket);
+						}
+
+						//alliberar IO_CONTEXT completat
+						delete lpIOContext;
+					}
+				} break;
+				case IO_OPERATION::READ: {
+					//recupero client context
+					CLIENT_CONTEXT *lpClientContext = lpIOContext->clientContext;
+
+					//detecto graceful shutdown
+					if(bytesTransferred == 0) {
+						cout << "El client ha tancat la connexio" << endl;
+						closesocket(lpClientContext->socket);
+						delete lpClientContext;
+						delete lpIOContext;
+					}
+					else {
+						//acumulo la petició
+						string data(lpIOContext->readBuffer, bytesTransferred);
+						lpClientContext->request.append(data);
+
+						cout << "Complecio READ" << endl;
+						cout << "Bytes rebuts: " << bytesTransferred << endl;
+						cout << "Dades rebudes <" << data << ">" << endl;
+
+						//busco final de http al request del cient
+						if(lpClientContext->request.find("\r\n\r\n") != std::string::npos) {
+							cout << "Peticio HTTP completada" << endl;
+
+							//preparo resposta
+							string body = "<h1>Servidor IOCP OK</h1>";
+							lpClientContext->response = "HTTP/1.1 200 OK\r\nContent-Length: " + to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
+							lpClientContext->bytesSent = 0;
+
+							//llenço WSASend
+							cout << "Enviant resposta..." << endl;
+							int result = LaunchWriteOperation(lpClientContext);
+							if(result != 0 && result != WSA_IO_PENDING) {
+								cout << "Error en operacio WSASend: " << result << endl;
+								closesocket(lpClientContext->socket);
+								delete lpClientContext;
+							}
+						}
+						else {
+							//llenço nova WSARead
+							int result = LaunchReadOperation(lpClientContext);
+							if(result != 0 && result != WSA_IO_PENDING) {
+								cout << "Error en operacio WSARecv: " << result << endl;
+								closesocket(lpClientContext->socket);
+								delete lpClientContext;
+							}
+						}
+						//allibero l'IO_CONTEXT completat
+						delete lpIOContext;
+					}
+				} break;
+				case IO_OPERATION::WRITE: {
+					//recupero client context
+					CLIENT_CONTEXT *lpClientContext = lpIOContext->clientContext;
+
+					//incremento bytes enviats
+					lpClientContext->bytesSent += bytesTransferred;
+
+					//comprovo bytes restants
+					if(lpClientContext->bytesSent < lpClientContext->response.size()) {
+						//queden dades per enviar
+						int result = LaunchWriteOperation(lpClientContext);
+						if(result != 0 && result != WSA_IO_PENDING) {
+							cout << "Error en operacio WSASend: " << result << endl;
+							closesocket(lpClientContext->socket);
+							delete lpClientContext;
+						}
+					}
+					else {
+						//resposta enviada, tanco socket client i allibero context client
+						cout << "Resposta enviada, enviats " << lpClientContext->bytesSent << "bytes" << endl;
+						closesocket(lpClientContext->socket);
+						delete lpClientContext;
+					}
+
+					//allibero l'IO_CONTEXT completat
+					delete lpIOContext;
+				} break;
+			}
+		}
+	}
+
+	return 0;
+}
+```
+
+I les funcions auxiliars per llençar les operacions asíncrones:
+
+```
+int LaunchReadOperation(CLIENT_CONTEXT *lpClientContext) {
+	IO_CONTEXT *lpReadContext = nullptr;
+	DWORD flags = 0;
+	DWORD bytesReceived = 0;
+	int result = 0;
+	int wsaError = 0;
+
+	//crear nou IO_CONTEXT per operació de lectura
+	lpReadContext = new IO_CONTEXT();
+	lpReadContext->operation = IO_OPERATION::READ;
+	lpReadContext->clientContext = lpClientContext;
+	lpReadContext->buffer.buf = lpReadContext->readBuffer;
+	lpReadContext->buffer.len = READ_BUFFER_SIZE;
+
+	//llençar el procés de lectura
+	if((result = WSARecv(lpClientContext->socket, &lpReadContext->buffer, 1, &bytesReceived, &flags, &lpReadContext->overlapped, nullptr)) == SOCKET_ERROR) {
+		if((wsaError = WSAGetLastError()) != WSA_IO_PENDING) {
+			delete lpReadContext;
+		}
+		return wsaError;
+	}
+	else {
+		return result;
+	}
+}
+
+int LaunchWriteOperation(CLIENT_CONTEXT *lpClientContext) {
+	IO_CONTEXT *lpWriteContext = nullptr;
+	DWORD bytesSent = 0;
+	int result;
+	int wsaError = 0;
+
+	lpWriteContext = new IO_CONTEXT();
+	lpWriteContext->operation = IO_OPERATION::WRITE;
+	lpWriteContext->clientContext = lpClientContext;
+	lpWriteContext->buffer.buf = lpClientContext->response.data() + lpClientContext->bytesSent;
+	lpWriteContext->buffer.len = static_cast<ULONG>(lpClientContext->response.size() - lpClientContext->bytesSent);
+
+	if((result = WSASend(lpClientContext->socket, &lpWriteContext->buffer, 1, &bytesSent, 0, &lpWriteContext->overlapped, nullptr)) == SOCKET_ERROR) {
+		if((wsaError = WSAGetLastError()) != WSA_IO_PENDING) {
+			delete lpWriteContext;
+		}
+		return wsaError;
+	}
+	else {
+		return result;
+	}
+}
+```
+
+## 24. Allargar vida útil del servidor
+Actualment el servidor només llença una operació asíncrona d'accept, la qual cosa vol dir que només accepta i serveix un client, i no fa rés mes. Al main hi tinc un bucle infinit que serveix per no tancar el fil principal després de llençar l'operació asíncrona d'acceptació. Per a que el seervidor pugui acceptar més clients, quan rebo una compleció d'acceptació he de llençar una nova operació asíncrona d'acceptació:
+
+```
+Llençar ACCEPT -> rebre compleció ACCEPT -> llençar ACCEPT + llençar READ -> ...
+```
 
