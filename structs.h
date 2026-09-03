@@ -28,6 +28,7 @@ struct CLIENT_CONTEXT {
 	SOCKET socket = INVALID_SOCKET;
 	string request;
 	string response;
+	size_t bytesSent = 0;//bytes enviats totals de la resposta
 };
 
 struct IO_CONTEXT {

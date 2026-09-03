@@ -27,16 +27,28 @@ DWORD WINAPI WorkerThread(LPVOID lpParam) {
 
 				//gestió segons cada cas d'operació
 				switch(lpIOContext->operation) {
-				case IO_OPERATION::ACCEPT: {
-					closesocket(lpIOContext->acceptSocket);
-					delete lpIOContext;
-				} break;
-				case IO_OPERATION::READ: {
-					
-				} break;
-				case IO_OPERATION::WRITE: {
+					case IO_OPERATION::ACCEPT: {
+						closesocket(lpIOContext->acceptSocket);
+						delete lpIOContext;
+					} break;
+					case IO_OPERATION::READ: {
+						cout << "Error en READ: " << error << endl;
 
-				} break;
+						//recupero client context, tanco socket i allibero recursos
+						CLIENT_CONTEXT* lpClientContext = lpIOContext->clientContext;
+						closesocket(lpClientContext->socket);
+						delete lpClientContext;
+						delete lpIOContext;
+					} break;
+					case IO_OPERATION::WRITE: {
+						cout << "Error en WRITE: " << error << endl;
+
+						//recupero client context, tanco socket i allibero recursos
+						CLIENT_CONTEXT* lpClientContext = lpIOContext->clientContext;
+						closesocket(lpClientContext->socket);
+						delete lpClientContext;
+						delete lpIOContext;
+					} break;
 				}
 			}
 		}
@@ -98,11 +110,21 @@ DWORD WINAPI WorkerThread(LPVOID lpParam) {
 
 						//busco final de http al request del cient
 						if(lpClientContext->request.find("\r\n\r\n") != std::string::npos) {
+							cout << "Peticio HTTP completada" << endl;
+
 							//preparo resposta
-							lpClientContext->response = "HTTP/1.1 200 OK\r\nContent-Length: 25\r\nConnection: close\r\nr\n<h1>Servidor IOCP OK</h1>";
+							string body = "<h1>Servidor IOCP OK</h1>";
+							lpClientContext->response = "HTTP/1.1 200 OK\r\nContent-Length: " + to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
+							lpClientContext->bytesSent = 0;
 
 							//llenço WSASend
-							cout << "Peticio HTTP completada" << endl;
+							cout << "Enviant resposta..." << endl;
+							int result = LaunchWriteOperation(lpClientContext);
+							if(result != 0 && result != WSA_IO_PENDING) {
+								cout << "Error en operacio WSASend: " << result << endl;
+								closesocket(lpClientContext->socket);
+								delete lpClientContext;
+							}
 						}
 						else {
 							//llenço nova WSARead
@@ -113,12 +135,36 @@ DWORD WINAPI WorkerThread(LPVOID lpParam) {
 								delete lpClientContext;
 							}
 						}
-						//allibero IO_CONTEXT completat
+						//allibero l'IO_CONTEXT completat
 						delete lpIOContext;
 					}
 				} break;
 				case IO_OPERATION::WRITE: {
+					//recupero client context
+					CLIENT_CONTEXT *lpClientContext = lpIOContext->clientContext;
 
+					//incremento bytes enviats
+					lpClientContext->bytesSent += bytesTransferred;
+
+					//comprovo bytes restants
+					if(lpClientContext->bytesSent < lpClientContext->response.size()) {
+						//queden dades per enviar
+						int result = LaunchWriteOperation(lpClientContext);
+						if(result != 0 && result != WSA_IO_PENDING) {
+							cout << "Error en operacio WSASend: " << result << endl;
+							closesocket(lpClientContext->socket);
+							delete lpClientContext;
+						}
+					}
+					else {
+						//resposta enviada, tanco socket client i allibero context client
+						cout << "Resposta enviada, enviats " << lpClientContext->bytesSent << "bytes" << endl;
+						closesocket(lpClientContext->socket);
+						delete lpClientContext;
+					}
+
+					//allibero l'IO_CONTEXT completat
+					delete lpIOContext;
 				} break;
 			}
 		}
@@ -145,7 +191,6 @@ int LaunchReadOperation(CLIENT_CONTEXT *lpClientContext) {
 	if((result = WSARecv(lpClientContext->socket, &lpReadContext->buffer, 1, &bytesReceived, &flags, &lpReadContext->overlapped, nullptr)) == SOCKET_ERROR) {
 		if((wsaError = WSAGetLastError()) != WSA_IO_PENDING) {
 			delete lpReadContext;
-			lpReadContext = nullptr;
 		}
 		return wsaError;
 	}
@@ -156,11 +201,23 @@ int LaunchReadOperation(CLIENT_CONTEXT *lpClientContext) {
 
 int LaunchWriteOperation(CLIENT_CONTEXT *lpClientContext) {
 	IO_CONTEXT *lpWriteContext = nullptr;
+	DWORD bytesSent = 0;
+	int result;
+	int wsaError = 0;
 
 	lpWriteContext = new IO_CONTEXT();
 	lpWriteContext->operation = IO_OPERATION::WRITE;
 	lpWriteContext->clientContext = lpClientContext;
+	lpWriteContext->buffer.buf = lpClientContext->response.data() + lpClientContext->bytesSent;
+	lpWriteContext->buffer.len = static_cast<ULONG>(lpClientContext->response.size() - lpClientContext->bytesSent);
 
-	lpWriteContext->buffer.buf = lpClientContext->response.data();
-	lpWriteContext->buffer.len = static_cast<ULONG>(lpClientContext->response.size());
+	if((result = WSASend(lpClientContext->socket, &lpWriteContext->buffer, 1, &bytesSent, 0, &lpWriteContext->overlapped, nullptr)) == SOCKET_ERROR) {
+		if((wsaError = WSAGetLastError()) != WSA_IO_PENDING) {
+			delete lpWriteContext;
+		}
+		return wsaError;
+	}
+	else {
+		return result;
+	}
 }
