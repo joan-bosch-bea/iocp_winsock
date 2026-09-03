@@ -740,7 +740,7 @@ if(lpClientContext->request.find("\r\n\r\n") != std::string::npos) {
 ja puc llençar l'operació d'escriptura asíncrona. La diferència principal entre les operacions de lectura i escriptura (a part de la pròpia operació) és que per la lectura no es pot saber el contingut que es rebrà (per extensió tampoc la seva llargària) i en canvi per l'operació d'escriptura si (i també per extensió la seva llargària). Amb això puc controlar el procés d'escriptura contrastant els bytes a anviar amb els bytes enviats.
 
 Creo el mètode que llença l'operació asíncrona d'escriptura:
-´´´
+```
 int LaunchWriteOperation(CLIENT_CONTEXT *lpClientContext) {
 	IO_CONTEXT *lpWriteContext = nullptr;
 
