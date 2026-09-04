@@ -1035,3 +1035,39 @@ Actualment el servidor només llença una operació asíncrona d'accept, la qual
 Llençar ACCEPT -> rebre compleció ACCEPT -> llençar ACCEPT + llençar READ -> ...
 ```
 
+Refactoritzo el codi per extreure el llançament de l'operació d'acceptació asíncrona:
+
+```
+int LaunchAcceptOperation(SERVER_CONTEXT *lpServerContext) {
+	IO_CONTEXT *lpAcceptContext;
+	DWORD bytesReceived = 0;
+	DWORD wsaError;
+
+	//crar io context
+	lpAcceptContext = new IO_CONTEXT();
+	lpAcceptContext->operation = IO_OPERATION::ACCEPT;
+	lpAcceptContext->acceptSocket = WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, nullptr, 0, WSA_FLAG_OVERLAPPED);
+	if(lpAcceptContext->acceptSocket == INVALID_SOCKET) {
+		cout << "Error en crear accept socket" << endl;
+		delete lpAcceptContext;
+		return 1;
+	}
+
+	//associar acceptSocket a iocp
+	if(CreateIoCompletionPort(reinterpret_cast<HANDLE>(lpAcceptContext->acceptSocket), lpServerContext->hCompletionPort, 0, 0) == nullptr) {
+		cout << "Error associant acceptSocket a IOCP" << endl;
+		closesocket(lpAcceptContext->acceptSocket);
+		delete lpAcceptContext;
+		return 1;
+	}
+
+	//llençar acceptex
+	if(!(lpServerContext->lpfnAcceptEx(lpServerContext->listeningSocket, lpAcceptContext->acceptSocket, lpAcceptContext->acceptBuffer, 0, ADDRESS_BUFFER_SIZE, ADDRESS_BUFFER_SIZE, &bytesReceived, &lpAcceptContext->overlapped))) {
+		if((wsaError = WSAGetLastError()) != ERROR_IO_PENDING) {
+			cout << "Error en AcceptEx: " << wsaError << endl;
+			return wsaError;
+		}
+	}
+	return 0;
+}
+```
